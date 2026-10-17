@@ -19,6 +19,8 @@ asr:
   device: "cuda"
   # Compute type: float16, int8_float16, int8
   compute_type: "float16"
+  # Whisper beam size: 1 = greedy (~20% faster on RTX 5070), 5 = upstream default
+  beam_size: 1
   # Language: auto, en, ja, zh, ko, etc.
   language: "auto"
   # Minimum speech duration (seconds) before sending to ASR

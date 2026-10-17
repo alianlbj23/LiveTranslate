@@ -370,11 +370,11 @@ class ControlPanel(QWidget):
         self._hub_combo.currentIndexChanged.connect(self._auto_save)
 
         self._ui_lang_combo = QComboBox()
-        self._ui_lang_combo.addItems(["English", "中文"])
+        self._ui_lang_combo.addItems(["English", "简体中文", "繁體中文"])
         from i18n import get_lang
 
         saved_lang = s.get("ui_lang", get_lang())
-        self._ui_lang_combo.setCurrentIndex(0 if saved_lang == "en" else 1)
+        self._ui_lang_combo.setCurrentIndex({"en": 0, "zh": 1, "zh_TW": 2}.get(saved_lang, 1))
         asr_layout.addWidget(QLabel(t("label_ui_lang")), 9, 0)
         asr_layout.addWidget(self._ui_lang_combo, 9, 1)
         self._ui_lang_combo.currentIndexChanged.connect(self._on_ui_lang_changed)
@@ -1388,7 +1388,7 @@ class ControlPanel(QWidget):
         self._current_settings["interim_interval"] = round(self._interim_interval_spin.value(), 2)
 
     def _on_ui_lang_changed(self, index):
-        lang = "en" if index == 0 else "zh"
+        lang = ("en", "zh", "zh_TW")[index] if 0 <= index < 3 else "zh"
         self._current_settings["ui_lang"] = lang
         _save_settings(self._current_settings)
         from i18n import set_lang

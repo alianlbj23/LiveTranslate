@@ -583,6 +583,7 @@ class LiveTranslateApp:
             "model_size": cache_model_key,
             "device": device,
             "compute_type": compute,
+            "beam_size": self._config["asr"].get("beam_size", 5),
             "hub": hub,
             "language": settings.get(
                 "asr_language", self._config["asr"].get("language", "auto")

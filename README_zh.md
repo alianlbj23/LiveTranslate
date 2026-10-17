@@ -1,6 +1,6 @@
 # LiveTranslate
 
-[English](README.md) | **中文**
+[English](README.md) | **简体中文** | [繁體中文](README_zh_TW.md)
 
 Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback）和可选的麦克风输入，语音识别后调用 LLM API 翻译，结果显示在透明悬浮字幕窗口上。
 

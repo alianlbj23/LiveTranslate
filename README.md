@@ -1,6 +1,6 @@
 # LiveTranslate
 
-**English** | [中文](README_zh.md)
+**English** | [简体中文](README_zh.md) | [繁體中文](README_zh_TW.md)
 
 Real-time audio translation for Windows. Captures system audio (WASAPI loopback) and optional microphone input, runs ASR, translates via LLM API, and displays results in a transparent overlay.
 

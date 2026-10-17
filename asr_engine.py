@@ -28,8 +28,15 @@ class ASREngine:
         language="auto",
         download_root=None,
         pad_seconds=None,
+        beam_size=5,
     ):
         self.language = language if language != "auto" else None
+        # beam_size=1 (greedy) measured ~20% faster than the upstream default of 5
+        # (RTX 5070, large-v3-turbo float16, 11s clip: 273ms -> 213ms)
+        try:
+            self._beam_size = max(1, int(beam_size))
+        except (TypeError, ValueError):
+            self._beam_size = 5
         self._model = WhisperModel(
             model_size,
             device=device,
@@ -38,7 +45,7 @@ class ASREngine:
             download_root=download_root,
         )
         self._set_input_padding(pad_seconds, log_change=False)
-        log.info(f"Model loaded: {model_size} on {device} ({compute_type})")
+        log.info(f"Model loaded: {model_size} on {device} ({compute_type}, beam_size={self._beam_size})")
         self._log_input_padding()
 
     @staticmethod
@@ -129,7 +136,7 @@ class ASREngine:
         segments, info = self._model.transcribe(
             audio_input,
             language=self.language,
-            beam_size=5,
+            beam_size=self._beam_size,
             vad_filter=False,
             word_timestamps=word_timestamps,
         )

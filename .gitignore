@@ -28,3 +28,6 @@ dist/
 build/
 release/
 *.egg-info/
+
+# launcher runtime state
+launcher/ollama.pid
