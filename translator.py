@@ -198,8 +198,22 @@ class Translator:
         overrides=None,
         extra_body=None,
         thinking_style=None,
+        zh_tw_postprocess=False,
     ):
         self._client = make_openai_client(api_base, api_key, proxy, timeout=timeout)
+        # Guarantee Traditional Chinese (Taiwan wording) output via OpenCC s2twp,
+        # independent of how well the LLM follows the prompt.
+        self._zh_tw_postprocess = bool(zh_tw_postprocess)
+        self._opencc = None
+        if self._zh_tw_postprocess:
+            try:
+                from opencc import OpenCC
+
+                self._opencc = OpenCC("s2twp")
+                log.info("Translator: zh-TW post-processing enabled (OpenCC s2twp)")
+            except Exception as e:  # package missing or dictionary failure
+                log.warning(f"Translator: zh-TW post-processing unavailable: {e}")
+                self._zh_tw_postprocess = False
         self._no_system_role = no_system_role
         if thinking_style is None:
             # Legacy configs only carry the no_think bool
@@ -280,11 +294,25 @@ class Translator:
         t._overrides = dict(self._overrides)
         t._extra_body = dict(self._extra_body)
         t._system_prompt_template = self._system_prompt_template
+        t._zh_tw_postprocess = self._zh_tw_postprocess
+        t._opencc = self._opencc
         t._context_turns = 0
         t._history = []
         t._last_prompt_tokens = 0
         t._last_completion_tokens = 0
         return t
+
+    def _post(self, text: str) -> str:
+        """Apply zh-TW post-processing when the target is Chinese."""
+        if not text or not self._zh_tw_postprocess or self._opencc is None:
+            return text
+        if not str(self._target_language).lower().startswith("zh"):
+            return text
+        try:
+            return self._opencc.convert(text)
+        except Exception as e:
+            log.warning(f"zh-TW post-processing failed: {e}")
+            return text
 
     def _build_system_prompt(self, source_lang):
         src = LANGUAGE_DISPLAY.get(source_lang, source_lang)
@@ -413,11 +441,12 @@ class Translator:
                 if delta.content:
                     chunks.append(delta.content)
                     if not self._json_response:
-                        yield "".join(chunks)
+                        yield self._post("".join(chunks))
         result = "".join(chunks).strip()
         if self._json_response:
             result = self._extract_json_translation(result)
         self._warn_if_thinking_burned(result)
+        result = self._post(result)
         if self._check_repetition(result):
             raise RepetitionError(result)
         self._append_history(text, result)
@@ -465,7 +494,7 @@ class Translator:
         if self._json_response:
             result = self._extract_json_translation(result)
         self._warn_if_thinking_burned(result)
-        return result
+        return self._post(result)
 
     def _translate_streaming(self, system_prompt, text):
         self._last_prompt_tokens = 0
@@ -498,4 +527,4 @@ class Translator:
         if self._json_response:
             result = self._extract_json_translation(result)
         self._warn_if_thinking_burned(result)
-        return result
+        return self._post(result)

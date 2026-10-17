@@ -217,6 +217,7 @@ class LiveTranslateApp:
             temperature=config["translation"]["temperature"],
             streaming=config["translation"]["streaming"],
             system_prompt=config["translation"].get("system_prompt"),
+            zh_tw_postprocess=config["translation"].get("zh_tw_postprocess", False),
         )
         self._translator.set_context_turns(
             config["translation"].get("context_window", 0)
@@ -489,6 +490,7 @@ class LiveTranslateApp:
             timeout=timeout,
             overrides=model_config.get("overrides"),
             extra_body=model_config.get("extra_body"),
+            zh_tw_postprocess=self._config["translation"].get("zh_tw_postprocess", False),
         )
         context_turns = model_config.get(
             "context_turns", self._config["translation"].get("context_window", 0)
@@ -584,6 +586,7 @@ class LiveTranslateApp:
             "device": device,
             "compute_type": compute,
             "beam_size": self._config["asr"].get("beam_size", 5),
+            "whisper_options": self._config["asr"].get("whisper") or {},
             "hub": hub,
             "language": settings.get(
                 "asr_language", self._config["asr"].get("language", "auto")

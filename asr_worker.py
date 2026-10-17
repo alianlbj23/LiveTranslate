@@ -96,6 +96,7 @@ def _load_engine(config: dict):
             download_root=download_root,
             pad_seconds=pad_seconds,
             beam_size=config.get("beam_size", 5),
+            whisper_options=config.get("whisper_options"),
         )
 
     if hasattr(engine, "set_language"):

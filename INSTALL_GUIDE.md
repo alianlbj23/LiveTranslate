@@ -200,6 +200,35 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 
 想改回原版行為：`config.yaml` 的 `beam_size` 改 5；Settings → VAD / ASR 把時間參數調回；翻譯模型編輯對話框把上下文數改回 5。
 
+### dev 分支的進一步優化（2026-10-18）
+
+| 改善 | 做法 | 位置 |
+|---|---|---|
+| 字幕保證繁體、台灣用語 | 翻譯結果（含串流中的部分文字）先經 OpenCC `s2twp` 轉換再顯示，模型就算漏出簡體字也會被轉掉（例：软件→軟體、视频→影片、鼠标→滑鼠） | `config.yaml` → `translation.zh_tw_postprocess: true`；`translator.py` |
+| Whisper 不再把上一句當提示 | `condition_on_previous_text: false`，避免「ご視聴ありがとうございました」之類的幻覺句一直重複 | `config.yaml` → `asr.whisper` |
+| 幻覺句過濾 | 辨識結果若「只有」已知的假字幕句（日文／中文／英文共 21 句，可自行增減）就直接丟掉，不送翻譯 | `asr.whisper.hallucination_phrases` |
+| 可加入人名／術語 | `asr.whisper.hotwords` 填 VTuber 名字、遊戲術語（逗號分隔），Whisper 會偏向辨識成這些詞 | `config.yaml` |
+| 可加入風格提示 | `asr.whisper.initial_prompt`，例如「こんにちは。今日は、配信を始めます。」可讓輸出帶標點，斷句更準（用 Anime-Whisper 時請留空） | `config.yaml` |
+| 翻譯提示詞加範例 | 系統提示詞多了三組「日文 → 台灣口語」範例，用語更一致；提示詞會被 Ollama 快取，不增加延遲 | `user_settings.json` → `system_prompt` |
+| Ollama KV cache 8-bit | `OLLAMA_KV_CACHE_TYPE=q8_0`（需搭配 flash attention），顯示記憶體再省一些，品質幾乎無差 | `launcher\start_jp_subtitles.ps1` |
+
+**翻譯模型比較**（同一台機器、8 句直播口語、暖機後逐句測，/v1 端點）：
+
+| 模型 | 平均延遲 | 顯示記憶體 | 品質（我逐句看過） | 結論 |
+|---|---|---|---|---|
+| `qwen3.5:9b`（Q4_K_M，關閉思考，帶 3 句上下文） | **250 ms／句** | 5.6 GB | 口語自然、理解直播用語（超留、聯動、BOSS 打不過）、台灣用語 | **維持預設** |
+| Tencent HY-MT1.5-7B（Q4_K_M，專用翻譯模型，需自建模板） | 201 ms／句 | 4.6 GB | 比 1.8B 通順，但仍不懂直播用語（スパチャ→「斯帕查」、やばい→「太嚇人」），沒有上下文 | 不採用 |
+| Tencent HY-MT1.5-1.8B（Q8_0，專用翻譯模型，需自建模板） | 140 ms／句 | 1.9 GB | 偏書面、不懂網路用語（スパチャ→「Spa 服務」、やばい→「太可怕」），偶爾漏出控制符 | 顯示記憶體真的不夠時的備案 |
+
+HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 的版本對話模板不正確（只會輸出「onse」），必須照官方 README 用 Modelfile 建立（`TEMPLATE` 含 `<|startoftext|>`、`<|extra_4|>`、`<|extra_0|>`、`<|eos|>`），本機已建好名為 `hy-mt1.5-1.8b` 與 `hy-mt1.5-7b` 的版本（不用可以 `ollama rm` 刪掉，共 6.5 GB）。它沒有 system 角色，提示詞要用「将以下文本翻译为繁體中文，注意只需要输出翻译后的结果，不要额外解释：」格式，所以在 LiveTranslate 需勾「無 system 角色」並把系統提示詞換成這一句。
+
+
+查過但沒採用的技術：
+- **Qwen3-ASR-1.7B**（2026-01）：日文 CER 比 Whisper turbo 略好（0.140 vs 0.184），但速度約慢 3 倍，而且要另外整合 transformers 推論；直播字幕以延遲優先，維持 Whisper large-v3-turbo。
+- **kotoba-whisper**（日文蒸餾版 Whisper）：速度快，但沒有可靠的 v2.2 評測與 CTranslate2 版本資訊，先不換。
+- **投機解碼（speculative decoding）**：Ollama 目前不支援；每句翻譯只產生十幾個 token，收益也有限。
+- **int8_float16**：實測在 RTX 5070 上比 float16 慢，不用。
+
 ### 繁體中文介面
 
 本 fork 新增 `i18n/zh_TW.yaml`（台灣用語）與 `i18n/CHANGELOG_zh_TW.md`，`user_settings.json` 的 `ui_lang` 已設為 `zh_TW`。Settings → VAD / ASR → 介面語言 可在 English / 简体中文 / 繁體中文 之間切換（需重新啟動）。字幕字型改為 Microsoft JhengHei，才有台灣慣用字形。

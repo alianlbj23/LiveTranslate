@@ -69,6 +69,7 @@ function Start-WindowsOllama {
     $env:OLLAMA_HOST            = "127.0.0.1:$Port"
     $env:OLLAMA_KEEP_ALIVE      = "-1"      # 模型載入後不再因閒置被卸載
     $env:OLLAMA_FLASH_ATTENTION = "1"       # 省顯示記憶體、提示詞處理較快
+    $env:OLLAMA_KV_CACHE_TYPE   = "q8_0"    # KV cache 量化成 8-bit：顯示記憶體省一半，翻譯品質幾乎無差
     $p = Start-Process -FilePath $Ollama -ArgumentList "serve" -WindowStyle Hidden -PassThru
     Set-Content -Path $PidFile -Value $p.Id -Encoding ascii
     for ($i = 0; $i -lt 30; $i++) {

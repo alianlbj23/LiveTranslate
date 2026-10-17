@@ -29,6 +29,7 @@ class ASREngine:
         download_root=None,
         pad_seconds=None,
         beam_size=5,
+        whisper_options=None,
     ):
         self.language = language if language != "auto" else None
         # beam_size=1 (greedy) measured ~20% faster than the upstream default of 5
@@ -44,9 +45,35 @@ class ASREngine:
             compute_type=compute_type,
             download_root=download_root,
         )
+        opts = dict(whisper_options or {})
+        self._condition_on_previous_text = bool(opts.get("condition_on_previous_text", True))
+        self._log_prob_threshold = opts.get("log_prob_threshold", -1.0)
+        self._no_speech_threshold = opts.get("no_speech_threshold", 0.6)
+        self._initial_prompt = (opts.get("initial_prompt") or "").strip() or None
+        self._hotwords = (opts.get("hotwords") or "").strip() or None
+        self._hallucination_phrases = {
+            self._normalize_text(p) for p in (opts.get("hallucination_phrases") or []) if p
+        }
         self._set_input_padding(pad_seconds, log_change=False)
-        log.info(f"Model loaded: {model_size} on {device} ({compute_type}, beam_size={self._beam_size})")
+        log.info(
+            f"Model loaded: {model_size} on {device} ({compute_type}, beam_size={self._beam_size}, "
+            f"condition_on_previous_text={self._condition_on_previous_text}, "
+            f"hallucination_filter={len(self._hallucination_phrases)} phrases)"
+        )
         self._log_input_padding()
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return "".join(ch for ch in text if ch.isalnum()).lower()
+
+    def _is_hallucination(self, text: str) -> bool:
+        if not self._hallucination_phrases:
+            return False
+        norm = self._normalize_text(text)
+        if not norm or norm in self._hallucination_phrases:
+            return bool(norm)
+        # The segment is nothing but one known phrase repeated
+        return any(p and norm.replace(p, "") == "" for p in self._hallucination_phrases)
 
     @staticmethod
     def _read_pad_seconds(value=None) -> float:
@@ -139,6 +166,11 @@ class ASREngine:
             beam_size=self._beam_size,
             vad_filter=False,
             word_timestamps=word_timestamps,
+            condition_on_previous_text=self._condition_on_previous_text,
+            log_prob_threshold=self._log_prob_threshold,
+            no_speech_threshold=self._no_speech_threshold,
+            initial_prompt=self._initial_prompt,
+            hotwords=self._hotwords,
         )
 
         text_parts = []
@@ -151,6 +183,9 @@ class ASREngine:
 
         full_text = " ".join(text_parts).strip()
         if not full_text:
+            return None
+        if self._is_hallucination(full_text):
+            log.info(f"Dropped known hallucination: {full_text!r}")
             return None
 
         detected_lang = info.language

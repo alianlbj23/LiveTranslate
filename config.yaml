@@ -21,6 +21,42 @@ asr:
   compute_type: "float16"
   # Whisper beam size: 1 = greedy (~20% faster on RTX 5070), 5 = upstream default
   beam_size: 1
+  # Extra faster-whisper options (only used by the Whisper engine)
+  whisper:
+    # Do not feed the previous segment back as prompt: stops hallucination loops
+    # ("ご視聴ありがとうございました" repeated forever on music/silence)
+    condition_on_previous_text: false
+    # Drop segments whose average log-probability is below this (null = faster-whisper default -1.0)
+    log_prob_threshold: -1.0
+    # Drop segments the model thinks are not speech (null = default 0.6)
+    no_speech_threshold: 0.6
+    # Optional text prompt to bias style/punctuation, e.g. "こんにちは。今日は、配信を始めます。" (leave empty for Anime-Whisper)
+    initial_prompt: ""
+    # Optional comma-separated names/terms to bias recognition towards (streamer names, game terms)
+    hotwords: ""
+    # Known Whisper hallucinations on silence / BGM: a segment equal to one of these is discarded
+    hallucination_phrases:
+      - "ご視聴ありがとうございました"
+      - "ご視聴ありがとうございます"
+      - "チャンネル登録をお願いします"
+      - "チャンネル登録お願いします"
+      - "最後までご視聴いただきありがとうございました"
+      - "字幕をご利用いただきありがとうございます"
+      - "おやすみなさい"
+      - "ありがとうございました"
+      - "Thank you for watching"
+      - "Thanks for watching"
+      - "优优独播剧场——YoYo Television Series Exclusive"
+      - "優優獨播劇場——YoYo Television Series Exclusive"
+      - "YoYo Television Series Exclusive"
+      - "字幕由Amara.org社区提供"
+      - "字幕由 Amara.org 社群提供"
+      - "請不吝點贊 訂閱 轉發 打賞支持明鏡與點點欄目"
+      - "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"
+      - "謝謝觀看"
+      - "谢谢观看"
+      - "感谢观看"
+      - "感謝觀看"
   # Language: auto, en, ja, zh, ko, etc.
   language: "auto"
   # Minimum speech duration (seconds) before sending to ASR
@@ -41,6 +77,9 @@ translation:
   model: "hunyuan-mt-chimera-7b"
   # Target language for translation
   target_language: "zh"
+  # Convert Chinese output to Traditional Chinese with Taiwan wording (OpenCC s2twp).
+  # Guarantees no Simplified characters even if the model ignores the prompt.
+  zh_tw_postprocess: true
   # Source language hint (auto = detect from ASR)
   source_language: "auto"
   # Context window size (number of recent translations to include)
