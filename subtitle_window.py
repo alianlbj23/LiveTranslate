@@ -531,6 +531,8 @@ class SubtitleWindow(QWidget):
     window_closed = pyqtSignal()
     # Emitted when the user double-clicks to lock the window (main syncs tray/settings)
     click_through_requested = pyqtSignal(bool)
+    # Live preview of the sentence being spoken: (original, provisional translation)
+    live_signal = pyqtSignal(str, str)
 
     _EDGE = 12       # px zone on the right edge used for width resizing
     _CORNER = 18     # px zone at the bottom-right corner
@@ -563,9 +565,16 @@ class SubtitleWindow(QWidget):
         self._last_insert_time = 0.0
         self._min_display_ms = int(self._settings.get("min_display_ms", 1500))  # minimum ms before a sentence can be replaced
         self._height_anim = None
+        # Live (unfinished) sentence shown after the committed ones
+        self._live = None
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(4000)  # stale preview safety clear
+        self._live_timer.timeout.connect(lambda: self._on_live("", ""))
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
+        self.live_signal.connect(self._on_live)
 
     @staticmethod
     def _is_pos_visible(x, y, margin=50):
@@ -962,6 +971,28 @@ class SubtitleWindow(QWidget):
             translations = {"": translations}
         self.update_text_signal.emit(original, json.dumps(translations, ensure_ascii=False))
 
+    def update_live(self, original: str, translation: str = ""):
+        """Thread-safe: show/update the sentence still being spoken."""
+        self.live_signal.emit(original or "", translation or "")
+
+    def clear_live(self):
+        self.live_signal.emit("", "")
+
+    @pyqtSlot(str, str)
+    def _on_live(self, original: str, translation: str):
+        if not original:
+            if self._live is None:
+                return
+            self._live = None
+            self._live_timer.stop()
+        else:
+            self._live = (original, translation)
+            self._live_timer.start()
+            if self._is_hidden_by_timeout:
+                self._restore_from_auto_hide()
+            self._restart_auto_hide_timer()
+        self._refresh_display()
+
     @pyqtSlot(str, str)
     def _on_update_text(self, original: str, translations_json: str):
         translations = json.loads(translations_json)
@@ -1010,6 +1041,12 @@ class SubtitleWindow(QWidget):
         self._sentences.append((original, translations))
         if len(self._sentences) > max_sentences:
             self._sentences = self._sentences[-max_sentences:]
+        # The final version of the previewed sentence replaces the preview
+        if self._live is not None:
+            lo = self._live[0]
+            if lo and original and (lo in original or original in lo or lo[-8:] in original):
+                self._live = None
+                self._live_timer.stop()
 
         if self._is_hidden_by_timeout:
             self._restore_from_auto_hide()
@@ -1027,7 +1064,11 @@ class SubtitleWindow(QWidget):
 
 
     def _refresh_display(self):
-        if not self._sentences:
+        items = list(self._sentences)
+        if self._live is not None:
+            live_o, live_t = self._live
+            items.append((live_o, {"": live_t if live_t else "\u2026"}))
+        if not items:
             for tw in self._text_widgets:
                 tw.set_text("")
             self._fit_height_snap()
@@ -1043,11 +1084,11 @@ class SubtitleWindow(QWidget):
             line_type = cfg.get("type", "original")
 
             if line_type == "original":
-                texts = [s[0] for s in self._sentences if s[0]]
+                texts = [s[0] for s in items if s[0]]
             else:
                 lang = cfg.get("lang", "")
                 texts = []
-                for _, tl_dict in self._sentences:
+                for _, tl_dict in items:
                     if isinstance(tl_dict, str):
                         if tl_dict:
                             texts.append(tl_dict)
@@ -1075,6 +1116,8 @@ class SubtitleWindow(QWidget):
 
     def clear(self):
         self._sentences.clear()
+        self._live = None
+        self._live_timer.stop()
         self._cancel_pending_segments()
         self._auto_hide_timer.stop()
         self._is_hidden_by_timeout = False

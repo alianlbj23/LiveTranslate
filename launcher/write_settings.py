@@ -72,7 +72,8 @@ def main() -> int:
             "asr_device": "cuda:0",
             "whisper_pad_seconds": 0.5,
             "incremental_asr": True,
-            "interim_interval": 1.0,  # GUI 下限就是 1.0 秒，管線另有 1 秒冷卻
+            "interim_interval": 0.5,  # 每 0.5 秒做一次增量辨識（本 fork 把下限從 1.0 降到 0.3）
+            "live_preview": True,  # 邊講邊翻：還沒講完的句子先顯示並暫時翻譯
             # --- VAD ---
             "vad_mode": "silero",
             "vad_threshold": 0.3,

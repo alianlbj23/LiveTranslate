@@ -111,6 +111,8 @@ label_silence_dur: "靜音時長:"
 label_incremental_asr: "增量識別:"
 incremental_asr_tooltip: "連續語音時每隔一段時間自動輸出已完成的句子"
 label_interim_interval: "識別間隔:"
+label_live_preview: "即時預覽（邊講邊翻）"
+live_preview_tooltip: "每次增量辨識都先顯示還沒講完的句子和暫時的翻譯，句子結束後由正式翻譯取代。"
 silence_auto: "自動"
 silence_fixed: "固定"
 

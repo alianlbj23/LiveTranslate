@@ -111,6 +111,8 @@ label_silence_dur: "Silence dur:"
 label_incremental_asr: "Incremental ASR:"
 incremental_asr_tooltip: "Auto-output completed sentences periodically during continuous speech"
 label_interim_interval: "Interim interval:"
+label_live_preview: "Live preview (translate while speaking)"
+live_preview_tooltip: "Shows the sentence still being spoken and a provisional translation on every interim pass; the final translation replaces it when the sentence ends."
 silence_auto: "Auto"
 silence_fixed: "Fixed"
 

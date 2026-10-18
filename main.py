@@ -260,6 +260,15 @@ class LiveTranslateApp:
         # Incremental ASR state
         self._incremental_enabled = False
         self._interim_interval = 2.0
+        # Live preview: show the sentence still being spoken plus a provisional
+        # translation on every interim ASR pass (see _emit_live_preview)
+        self._live_preview = True
+        self._live_seq = 0
+        self._live_last_text = ""
+        self._live_lang = "auto"
+        self._live_dirty = False
+        self._live_inflight = False
+        self._live_executor = ThreadPoolExecutor(max_workers=1)
         self._interim_pending = ""
         self._interim_active = False
         self._last_interim_samples = 0
@@ -322,6 +331,10 @@ class LiveTranslateApp:
             self._incremental_enabled = settings["incremental_asr"]
         if "interim_interval" in settings:
             self._interim_interval = settings["interim_interval"]
+        if "live_preview" in settings:
+            self._live_preview = bool(settings["live_preview"])
+            if not self._live_preview:
+                self._clear_live_preview()
         if "target_language" in settings:
             self._target_language = settings["target_language"]
             if self._overlay:
@@ -1224,6 +1237,7 @@ class LiveTranslateApp:
         self._last_interim_check_time = 0.0
         self._interim_committed_tail = ""
         self._tl_executor.shutdown(wait=True)
+        self._clear_live_preview()
         self._transcript.close()
         if self._mem_periodic_timer is not None:
             try:
@@ -1422,7 +1436,7 @@ class LiveTranslateApp:
         audio, duration = peek
 
         # Don't bother with very short buffers
-        if duration < 1.5:
+        if duration < max(1.0, self._interim_interval):
             return False
 
         # Word timestamp alignment is expensive for repeated interim passes.
@@ -1455,6 +1469,8 @@ class LiveTranslateApp:
         split_start = time.perf_counter()
         sentences = self._split_sentences(full_text, result["language"])
         split_ms = (time.perf_counter() - split_start) * 1000
+        # The last (still unfinished) sentence is previewed immediately
+        self._emit_live_preview((sentences[-1] if sentences else full_text).strip(), result["language"])
         if len(sentences) <= 1:
             return False
         log.debug(f"Interim split [{result['language']}] ({split_ms:.1f}ms): {len(sentences)} parts -> {sentences}")
@@ -1529,6 +1545,60 @@ class LiveTranslateApp:
         self._interim_active = True
         log.info(f"Interim ASR: committed {len(complete)} sentence(s), trimmed {trim_samples / 16000:.2f}s")
         return True
+
+    # --- Live preview (simultaneous-interpretation style) ---
+    def _emit_live_preview(self, text: str, lang: str):
+        """Show the sentence still being spoken right away and translate it provisionally."""
+        if not self._live_preview or not text or text == self._live_last_text:
+            return
+        if not any(c.isalnum() for c in text):
+            return
+        self._live_last_text = text
+        self._live_lang = lang
+        self._live_seq += 1
+        self._live_dirty = True
+        log.debug(f"Live preview: {text}")
+        if self._subwin and self._subwin.isVisible():
+            self._subwin.update_live(text, "")
+        self._start_live_worker()
+
+    def _start_live_worker(self):
+        if self._live_inflight or not self._translator:
+            return
+        self._live_inflight = True
+        self._live_executor.submit(self._live_translate_loop)
+
+    def _live_translate_loop(self):
+        try:
+            while self._live_dirty and self._live_preview:
+                self._live_dirty = False
+                seq, text, lang = self._live_seq, self._live_last_text, self._live_lang
+                if not text:
+                    return
+                try:
+                    # Fresh copy without context history: partial sentences must not
+                    # pollute the context used for final translations.
+                    translator = self._translator.with_target_language(self._target_language)
+                    t0 = time.perf_counter()
+                    out = translator.translate(text, lang)
+                    log.info(f"Live translate ({(time.perf_counter() - t0) * 1000:.0f}ms): {out}")
+                except Exception as e:
+                    log.debug(f"Live preview translate error: {e}")
+                    return
+                if seq == self._live_seq and out and self._subwin and self._subwin.isVisible():
+                    self._subwin.update_live(text, out)
+                # If newer text arrived meanwhile, _live_dirty is True and we loop
+        finally:
+            self._live_inflight = False
+        if self._live_dirty and self._live_preview:
+            self._start_live_worker()
+
+    def _clear_live_preview(self):
+        self._live_last_text = ""
+        self._live_seq += 1
+        self._live_dirty = False
+        if self._subwin:
+            self._subwin.clear_live()
 
     def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
         """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
@@ -1667,7 +1737,7 @@ class LiveTranslateApp:
                     elapsed = (buf_samples - self._last_interim_samples) / 16000
                     now = time.perf_counter()
                     cooldown = now - self._last_interim_check_time
-                    if total_dur >= self._interim_interval and elapsed >= self._interim_interval and cooldown >= 1.0:
+                    if total_dur >= self._interim_interval and elapsed >= self._interim_interval and cooldown >= min(1.0, self._interim_interval):
                         self._last_interim_check_time = now
                         self._enqueue_asr("interim", None)
                 continue
