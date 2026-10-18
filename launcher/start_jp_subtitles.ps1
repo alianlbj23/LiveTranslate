@@ -67,7 +67,7 @@ function Start-WindowsOllama {
     }
     Write-Info "啟動 Windows 版 Ollama（連接埠 $Port，模型常駐、flash attention）..."
     $env:OLLAMA_HOST            = "127.0.0.1:$Port"
-    $env:OLLAMA_KEEP_ALIVE      = "-1"      # 模型載入後不再因閒置被卸載
+    $env:OLLAMA_KEEP_ALIVE      = "30m"     # 閒置 30 分鐘才卸載（正常結束時會立刻釋放，這是保險）
     $env:OLLAMA_FLASH_ATTENTION = "1"       # 省顯示記憶體、提示詞處理較快
     $env:OLLAMA_KV_CACHE_TYPE   = "q8_0"    # KV cache 量化成 8-bit：顯示記憶體省一半，翻譯品質幾乎無差
     $p = Start-Process -FilePath $Ollama -ArgumentList "serve" -WindowStyle Hidden -PassThru
@@ -150,7 +150,7 @@ Write-Info "背景預先載入翻譯模型..."
 $null = Start-Job -ArgumentList $Port, $Model -ScriptBlock {
     param($p, $m)
     try {
-        $body = '{"model":"' + $m + '","keep_alive":-1}'
+        $body = '{"model":"' + $m + '","keep_alive":"30m"}'
         Invoke-RestMethod -Uri "http://127.0.0.1:$p/api/generate" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 300 | Out-Null
     } catch {}
 }
@@ -167,6 +167,25 @@ Set-Location $Root
 & $Python main.py
 $code = $LASTEXITCODE
 Get-Job | Remove-Job -Force -ErrorAction SilentlyContinue
+
+# ---- Step 5: release the GPU ----
+Write-Info "釋放顯示記憶體：卸載翻譯模型並關閉本腳本啟動的 Ollama..."
+try {
+    $ps = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/ps" -TimeoutSec 3
+    foreach ($m in @($ps.models)) {
+        $body = '{"model":"' + $m.name + '","keep_alive":0}'
+        Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/generate" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 15 | Out-Null
+        Write-Ok "已卸載 $($m.name)"
+    }
+} catch {}
+if (Test-Path $PidFile) {
+    try {
+        $opid = [int](Get-Content $PidFile -ErrorAction Stop)
+        $proc = Get-Process -Id $opid -ErrorAction Stop
+        if ($proc.Name -eq "ollama") { Stop-Process -Id $opid -Force; Write-Ok "Ollama 服務已關閉（下次啟動會自動重開）。" }
+    } catch {}
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
 if ($code -ne 0) {
     Write-Err "LiveTranslate 異常結束（exit code $code）。"
     Read-Host "按 Enter 關閉"

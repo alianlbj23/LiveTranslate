@@ -1600,6 +1600,37 @@ class LiveTranslateApp:
         if self._subwin:
             self._subwin.clear_live()
 
+    def release_gpu(self):
+        """Free GPU memory held on our behalf: unload the Ollama translation model
+        (keep_alive=0) when the API is a local Ollama. Safe to call more than once."""
+        if getattr(self, "_gpu_released", False):
+            return
+        self._gpu_released = True
+        try:
+            model = self._panel.get_active_model() if self._panel else None
+            if not model:
+                return
+            api_base = str(model.get("api_base", ""))
+            host = api_base.split("//", 1)[-1].split("/", 1)[0].lower()
+            if not (host.startswith("127.0.0.1") or host.startswith("localhost")):
+                return
+            base = api_base.rsplit("/v1", 1)[0]
+            import httpx
+
+            with httpx.Client(trust_env=False, timeout=5.0) as client:
+                try:
+                    loaded = client.get(f"{base}/api/ps").json().get("models") or []
+                except Exception:
+                    loaded = [{"name": model.get("model", "")}]
+                for m in loaded:
+                    name = m.get("name") or m.get("model")
+                    if not name:
+                        continue
+                    client.post(f"{base}/api/generate", json={"model": name, "keep_alive": 0})
+                    log.info(f"Ollama model unloaded from GPU: {name}")
+        except Exception as e:
+            log.warning(f"Could not release Ollama GPU memory: {e}")
+
     def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
         """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
         original_text = text.strip()
@@ -2371,7 +2402,11 @@ def main():
 
     def on_quit():
         live_trans.stop()
+        live_trans.release_gpu()
         app.quit()
+
+    # Any other exit path (overlay Quit, Alt+F4, exceptions) still frees the GPU
+    app.aboutToQuit.connect(live_trans.release_gpu)
 
     quit_action.triggered.connect(on_quit)
     menu.addAction(quit_action)
