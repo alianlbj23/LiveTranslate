@@ -1984,9 +1984,17 @@ def main():
         pos = subwin.pos()
         sm["window_x"] = pos.x()
         sm["window_y"] = pos.y()
+        sm["window_width"] = subwin.width()
         settings["subtitle_mode"] = sm
         panel._current_settings["subtitle_mode"] = sm
         _save_settings(settings)
+        # Keep the settings tab's width spin in sync with drag-resizing
+        w = getattr(panel, "_subtitle_widget", None)
+        if w is not None and hasattr(w, "_width_spin"):
+            w._width_spin.blockSignals(True)
+            w._width_spin.setValue(subwin.width())
+            w._width_spin.blockSignals(False)
+            w._settings["window_width"] = subwin.width()
 
     _subwin_notified = [False]
 
@@ -2046,6 +2054,8 @@ def main():
         w._settings["click_through"] = checked
 
     subwin_ct_action.toggled.connect(on_toggle_subwin_ct)
+    # Double-click on the subtitle window locks it (click-through); mirror into the tray toggle
+    subwin.click_through_requested.connect(subwin_ct_action.setChecked)
     menu.addAction(subwin_ct_action)
 
     # Connect overlay subtitle button

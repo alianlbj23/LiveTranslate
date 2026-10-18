@@ -3,7 +3,8 @@ Subtitle window - clean text-only window for OBS capture.
 Uses QPainterPath for outlined text rendering.
 
 Usage:
-  - Middle-click drag to move the window
+  - Left-drag (or middle-drag) to move; drag the right edge / bottom-right corner to change width
+  - Double-click to lock (enables click-through); unlock via tray menu "Subtitle Click-through"
   - Configure via tray menu → Subtitle Mode → Settings
   - OBS: Window Capture → select "LiveTranslate Subtitle" → check "Allow Transparency"
 """
@@ -408,7 +409,11 @@ class _SubtitleTextWidget(QWidget):
             self._last_width = w
             self._rewrap()
             self._text_cache = None
-            self.setFixedHeight(self.desired_height())
+            new_h = self.desired_height()
+            if new_h != self.height():
+                self.setFixedHeight(new_h)
+                # Width changed the wrap count: let the window re-fit its height
+                self.height_changed.emit()
 
     def _render_text_pixmap(self):
         lines = self._wrapped_lines or [self._text]
@@ -488,6 +493,29 @@ class _SubtitleTextWidget(QWidget):
         painter.end()
 
 
+class _EditFrame(QWidget):
+    """Dashed border + corner grip drawn over the subtitle window while it is
+    unlocked and hovered, so the user can see it is draggable / resizable."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(255, 255, 255, 200), 2, Qt.PenStyle.DashLine))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 6, 6)
+        # Corner grip: three short diagonal lines
+        p.setPen(QPen(QColor(255, 255, 255, 230), 2))
+        w, h = self.width(), self.height()
+        for i in (4, 9, 14):
+            p.drawLine(w - 2 - i, h - 2, w - 2, h - 2 - i)
+        p.end()
+
+
 class SubtitleWindow(QWidget):
     """Clean text-only subtitle window for OBS capture.
 
@@ -498,6 +526,13 @@ class SubtitleWindow(QWidget):
     update_text_signal = pyqtSignal(str, str)  # original, translations_json
     position_changed = pyqtSignal()
     window_closed = pyqtSignal()
+    # Emitted when the user double-clicks to lock the window (main syncs tray/settings)
+    click_through_requested = pyqtSignal(bool)
+
+    _EDGE = 12       # px zone on the right edge used for width resizing
+    _CORNER = 18     # px zone at the bottom-right corner
+    _MIN_WIDTH = 200
+    _MAX_WIDTH = 3840
 
     def __init__(self, settings=None):
         super().__init__()
@@ -505,6 +540,8 @@ class SubtitleWindow(QWidget):
         self._text_widgets = []
         self._sentences = []  # [(original, {lang: text, ...}), ...]
         self._drag_pos = None
+        self._resize_start = None  # (mouse x, width) while dragging the right edge
+        self._hover = False
         self._bg_pixmap = None
         self._click_through = bool(self._settings.get("click_through", False))
         # Qt clears the extended style on show/raise/flag changes, so re-assert it
@@ -583,6 +620,11 @@ class SubtitleWindow(QWidget):
         self._rebuild_text_widgets()
 
         self._main_layout.addWidget(self._content)
+
+        # Dashed frame + corner grip shown while hovering an unlocked window
+        self._edit_frame = _EditFrame(self)
+        self._edit_frame.hide()
+        self.setMouseTracking(True)
 
         self._apply_background()
         self._fit_height_animated()
@@ -764,6 +806,10 @@ class SubtitleWindow(QWidget):
         else:
             self._ct_timer.stop()
         self._apply_click_through()
+        self._update_edit_frame()
+
+    def is_click_through(self) -> bool:
+        return self._click_through
 
     def _apply_click_through(self):
         try:
@@ -786,26 +832,108 @@ class SubtitleWindow(QWidget):
         # Qt resets the extended style across hide/show, so re-assert it here.
         self._apply_click_through()
 
-    # --- Middle-click drag ---
+    # --- Drag / resize / lock ---
+    _DRAG_BUTTONS = Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton
+
+    def _edge_zone(self, pos):
+        """Return "corner", "right" or None for a local position."""
+        x, y = pos.x(), pos.y()
+        if x >= self.width() - self._CORNER and y >= self.height() - self._CORNER:
+            return "corner"
+        if x >= self.width() - self._EDGE:
+            return "right"
+        return None
+
+    def _update_cursor(self, pos):
+        if self._click_through:
+            self.unsetCursor()
+            return
+        zone = self._edge_zone(pos)
+        if zone == "corner":
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif zone == "right":
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def _update_edit_frame(self):
+        if not hasattr(self, "_edit_frame"):
+            return
+        self._edit_frame.setGeometry(self.rect())
+        show = self._hover and not self._click_through
+        self._edit_frame.setVisible(show)
+        if show:
+            self._edit_frame.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_edit_frame()
+
+    def enterEvent(self, event):
+        self._hover = True
+        self._update_edit_frame()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self._update_edit_frame()
+        self.unsetCursor()
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.MiddleButton:
-            self._drag_pos = (
-                event.globalPosition().toPoint()
-                - self.frameGeometry().topLeft()
-            )
+        if event.button() & self._DRAG_BUTTONS and not self._click_through:
+            local = event.position().toPoint()
+            if event.button() == Qt.MouseButton.LeftButton and self._edge_zone(local):
+                self._resize_start = (event.globalPosition().toPoint().x(), self.width())
+                self._drag_pos = None
+            else:
+                self._resize_start = None
+                self._drag_pos = (
+                    event.globalPosition().toPoint()
+                    - self.frameGeometry().topLeft()
+                )
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_pos and event.buttons() & Qt.MouseButton.MiddleButton:
+        if self._resize_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            start_x, start_w = self._resize_start
+            new_w = start_w + (event.globalPosition().toPoint().x() - start_x)
+            new_w = max(self._MIN_WIDTH, min(self._MAX_WIDTH, new_w))
+            if new_w != self.width():
+                self.setFixedWidth(new_w)   # text widgets re-wrap in their resizeEvent
+                self._fit_height_snap()
+            event.accept()
+            return
+        if self._drag_pos and event.buttons() & self._DRAG_BUTTONS:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+            return
+        self._update_cursor(event.position().toPoint())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.MiddleButton:
-            if self._drag_pos:
-                self._drag_pos = None
-                self.position_changed.emit()
+        if event.button() & self._DRAG_BUTTONS and (self._drag_pos or self._resize_start is not None):
+            self._drag_pos = None
+            self._resize_start = None
+            self._settings["window_width"] = self.width()
+            self.position_changed.emit()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        # Double-click = lock in place: enable click-through so the mouse passes through
+        if event.button() == Qt.MouseButton.LeftButton and not self._click_through:
+            self._drag_pos = None
+            self._resize_start = None
+            self._settings["click_through"] = True
+            self.set_click_through(True)
+            self.click_through_requested.emit(True)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def closeEvent(self, event):
         self.window_closed.emit()
