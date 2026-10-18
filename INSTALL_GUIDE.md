@@ -186,6 +186,10 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | Ollama `OLLAMA_KEEP_ALIVE=-1` | 閒置 5 分鐘卸載 | **常駐** | 直播安靜一陣後第一句不用等 10–30 秒重載 |
 | Ollama `OLLAMA_FLASH_ATTENTION=1` | 關 | **開** | 省顯示記憶體、提示詞處理較快 |
 | 啟動時預先載入翻譯模型 | 無 | **有**（與載入 Whisper 同時進行） | 第一句就是正常速度 |
+| VAD 靜音判定 `silence_mode` / `silence_duration` | auto（0.3–2.0 秒自適應） | **fixed 0.5 秒** | 講完停 0.5 秒就送出，不會等到 2 秒；代價是長句較容易被切成兩段 |
+| `min_speech_duration` | 1.0 s | **0.6 s** | 短句（「はい」「やばい」）不用等併入下一句 |
+| 字幕視窗最短顯示時間 `subtitle_mode.min_display_ms` | 1500 ms（寫死） | **300 ms**（改為可設定） | 原本每句至少佔 1.5 秒、新句還會把排隊中的前一句取消，講得快時字幕會晚 1.5 秒甚至漏句；已改成「排隊中的句子先顯示再接新句」，不再漏句 |
+| 字幕視窗顯示句數 `subtitle_mode.sentences` | 1 | **2** | 上一句留著、新句直接接上，不用等 |
 
 實測（RTX 5070，faster-whisper large-v3-turbo，11.4 秒語音，取 3 次最快值）：
 
@@ -195,6 +199,12 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | int8_float16 | 302 ms | 236 ms（在 RTX 50 上反而比 float16 慢，不採用） |
 
 辨識結果四種設定完全相同。注意：純辨識只要 0.2–0.3 秒，實際看直播時每句 0.8–1.9 秒的大部分時間花在等停頓（VAD）與第一次呼叫的暖機，所以 VAD 參數的調整比 beam size 更有感。
+
+**字幕出現太慢時去哪裡調**（由影響大到小）：
+1. 設定 → VAD / ASR → 時間參數：「靜音模式」固定、「靜音時長」0.3–0.5 秒（越小越快、越容易切半句）、「最短語音」0.5 秒、「最長語音」4–5 秒。
+2. 設定 → 字幕 → 顯示句數 2～3；`user_settings.json` 的 `subtitle_mode.min_display_ms`（毫秒，沒有 GUI 欄位）。
+3. 翻譯模型編輯 → 上下文數 2～3（越少提示詞越短）。
+4. 以上都調了還慢，看系統匣 → Show Log 裡 `ASR (xxx ms)` 與 `Translate (xxx ms)` 的數字：若 ASR 超過 1 秒，通常是顯示記憶體被其他程式吃掉（關 Wallpaper Engine / 遊戲）。
 
 這些 Ollama 環境變數只在「由啟動腳本開的 Ollama」生效，所以啟動腳本會記錄自己開的 Ollama 的 PID（`launcher\ollama.pid`）；若發現 11434 上的是系統匣自動啟動的舊服務（沒有快速設定），會自動把它關掉並重新以快速設定啟動。這不會動到 WSL 裡的 Ollama。
 

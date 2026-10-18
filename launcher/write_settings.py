@@ -77,12 +77,14 @@ def main() -> int:
             "vad_mode": "silero",
             "vad_threshold": 0.3,
             "energy_threshold": 0.02,
-            "min_speech_duration": 1.0,
+            "min_speech_duration": 0.6,
             "max_speech_duration": 5.0,
-            "silence_mode": "auto",
-            "silence_duration": 0.8,
+            "silence_mode": "fixed",  # 固定 0.5 秒停頓就送出，字幕出現得快；auto 最長會等 2 秒
+            "silence_duration": 0.5,
             # --- translation ---
             "target_language": "zh",
+            # 獨立字幕視窗：同時顯示 2 句、每句最短顯示 0.3 秒，講得快也跟得上
+            "subtitle_mode": {"sentences": 2, "min_display_ms": 300},
             "system_prompt": SYSTEM_PROMPT,
             "models": [
                 {

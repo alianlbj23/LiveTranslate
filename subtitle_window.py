@@ -61,6 +61,9 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
     "auto_hide_timeout": 5,
     "auto_hide_animation": "fade",
     "auto_hide_duration": 300,
+    # Minimum time a sentence stays before the next one may replace it (ms).
+    # Lower = subtitles keep up with fast talkers; pair with "sentences": 2.
+    "min_display_ms": 1500,
     "click_through": False,
     "lines": [
         {
@@ -558,7 +561,7 @@ class SubtitleWindow(QWidget):
         self._pending_segment_timers = []
         # Minimum display time: queue rapid updates instead of replacing instantly
         self._last_insert_time = 0.0
-        self._min_display_ms = 1500  # minimum ms before a sentence can be replaced
+        self._min_display_ms = int(self._settings.get("min_display_ms", 1500))  # minimum ms before a sentence can be replaced
         self._height_anim = None
 
         self._setup_ui()
@@ -730,6 +733,7 @@ class SubtitleWindow(QWidget):
             self._content_layout.addWidget(tw)
 
         self._content_layout.setSpacing(self._settings.get("line_spacing", 8))
+        self._min_display_ms = int(self._settings.get("min_display_ms", 1500))
 
         w = self._settings.get("window_width", 1000)
         self.setFixedWidth(w)
@@ -961,7 +965,9 @@ class SubtitleWindow(QWidget):
     @pyqtSlot(str, str)
     def _on_update_text(self, original: str, translations_json: str):
         translations = json.loads(translations_json)
-        self._cancel_pending_segments()
+        # A sentence still waiting for its minimum-display slot is shown right away
+        # instead of being dropped, so fast speech never loses subtitles.
+        self._flush_pending_segments()
 
         # Respect minimum display time: delay if previous sentence was inserted recently
         now_ms = time.monotonic() * 1000
@@ -974,9 +980,28 @@ class SubtitleWindow(QWidget):
             timer = QTimer(self)
             timer.setSingleShot(True)
             timer.setInterval(base_delay)
-            timer.timeout.connect(lambda o=original, t=translations: self._insert_sentence(o, t))
+            timer._payload = (original, translations)
+            timer.timeout.connect(lambda tm=timer: self._fire_pending(tm))
             timer.start()
             self._pending_segment_timers.append(timer)
+
+    def _fire_pending(self, timer):
+        if timer in self._pending_segment_timers:
+            self._pending_segment_timers.remove(timer)
+        original, translations = timer._payload
+        timer.deleteLater()
+        self._insert_sentence(original, translations)
+
+    def _flush_pending_segments(self):
+        """Insert every queued sentence immediately (oldest first)."""
+        pending = self._pending_segment_timers
+        self._pending_segment_timers = []
+        for timer in pending:
+            timer.stop()
+            payload = getattr(timer, "_payload", None)
+            timer.deleteLater()
+            if payload:
+                self._insert_sentence(*payload)
 
     def _insert_sentence(self, original: str, translations: dict):
         """Insert a single sentence and refresh display."""
