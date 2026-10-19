@@ -1,5 +1,6 @@
 ﻿# LiveTranslate 單一入口選單
-# 雙擊 LiveTranslate.bat 會開這個選單；直接按 Enter = 第 1 項（啟動雙字幕），輸入數字進其他功能。
+# 雙擊 LiveTranslate.bat 會開啟動視窗（launcher/gui.ps1）：Enter = 啟動字幕；也能切換翻譯模型、檢查環境。
+# 視窗開不了時（例如沒有桌面環境）自動改用文字選單：直接按 Enter = 第 1 項，輸入數字進其他功能。
 # 也可直接指定動作（捷徑用）：powershell -File menu.ps1 -Action start | verify
 param(
     [ValidateSet("menu", "start", "verify", "setup")]
@@ -16,7 +17,9 @@ $VerifyScript = Join-Path $Root "launcher\verify.ps1"
 $SetupScript  = Join-Path $Root "launcher\setup.ps1"
 $ReadyMarker  = Join-Path $Root ".venv\.livetranslate-ready"
 $ModelFile    = Join-Path $Root "launcher\selected_model.txt"
+$GuideFile    = Join-Path $Root "INSTALL_GUIDE.md"
 . (Join-Path $Root "launcher\model.ps1")
+. (Join-Path $Root "launcher\gui.ps1")
 
 function Get-ActivePort {
     if (Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue) { return 11435 }
@@ -46,18 +49,42 @@ function Switch-Model {
     Write-Host "已切換為 $Model（LiveTranslate 重新啟動後生效）。" -ForegroundColor Green
 }
 
-function Invoke-Choice {
-    param([string]$Choice)
-    switch ($Choice.Trim()) {
-        "1" { & $StartScript }
-        "2" { & $VerifyScript }
-        "3" { Switch-Model "qwen3.5:4b" }
-        "4" { Switch-Model "qwen3.5:9b" }
-        "5" { Start-Process (Join-Path $Root "INSTALL_GUIDE.md") }
-        "0" { exit 0 }
-        ""  { & $StartScript }
-        default { Write-Host "無效的選項：$Choice" -ForegroundColor Yellow }
+function Show-TextMenu {
+    # 文字選單（啟動視窗開不了時的備援）：模型清單來自 local_models.json
+    $catalog = @(Get-LauncherCatalog -Root $Root)
+    $current = Get-LauncherModel -Path $ModelFile
+    Write-Host ""
+    Write-Host "============ LiveTranslate ============" -ForegroundColor Magenta
+    Write-Host " 1) 啟動日文雙字幕                （預設：直接按 Enter）"
+    Write-Host " 2) 檢查 GPU / Ollama / 翻譯是否正常"
+    for ($i = 0; $i -lt $catalog.Count; $i++) {
+        $e = $catalog[$i]
+        $mark = if ($e.model -eq $current) { "（使用中）" } else { "" }
+        Write-Host (" {0}) 切換翻譯模型為 {1}：{2}{3}" -f ($i + 3), $e.label, $e.note, $mark)
     }
+    $guideNo = $catalog.Count + 3
+    Write-Host (" {0}) 開啟安裝說明 INSTALL_GUIDE.md" -f $guideNo)
+    Write-Host "    （每次啟動會自動檢查更新；按「結束」關閉程式就會釋放顯示卡）" -ForegroundColor DarkGray
+    Write-Host " 0) 離開"
+    $choice = (Read-Host "請輸入數字（直接按 Enter = 啟動）").Trim()
+    $n = 0
+    if ($choice -eq "" -or $choice -eq "1") { return @{ Action = "start" } }
+    if ($choice -eq "2") { return @{ Action = "verify" } }
+    if ($choice -eq "0") { return @{ Action = "exit" } }
+    if ([int]::TryParse($choice, [ref]$n)) {
+        if ($n -eq $guideNo) { return @{ Action = "guide" } }
+        if ($n -ge 3 -and $n -lt $guideNo) {
+            $e = $catalog[$n - 3]
+            $ask = { param($text) ((Read-Host ($text.Replace("`n`n", " ") + " (y/N)")).Trim().ToLower() -eq "y") }
+            $decision = Resolve-SwitchRequest -Entry $e -CurrentModel $current `
+                -Downloaded (Test-OllamaModelDownloaded -Model $e.model) -Confirm $ask
+            if ($decision -eq "switch") { return @{ Action = "switch"; Model = $e.model } }
+            if ($e.model -eq $current) { Write-Host "目前已經在使用 $($e.label)。" -ForegroundColor Green }
+            return @{ Action = "none" }
+        }
+    }
+    Write-Host "無效的選項：$choice" -ForegroundColor Yellow
+    return @{ Action = "none" }
 }
 
 if ($Action -eq "setup")  { & $SetupScript;  exit $LASTEXITCODE }
@@ -73,17 +100,24 @@ if (-not (Test-Path $Python) -or -not (Test-Path $ReadyMarker)) {
 if ($Action -eq "start")  { & $StartScript;  exit $LASTEXITCODE }
 if ($Action -eq "verify") { & $VerifyScript; exit $LASTEXITCODE }
 
+$useText = $false
 while ($true) {
-    Write-Host ""
-    Write-Host "============ LiveTranslate ============" -ForegroundColor Magenta
-    Write-Host " 1) 啟動日文雙字幕                （預設：直接按 Enter）"
-    Write-Host " 2) 檢查 GPU / Ollama / 翻譯是否正常"
-    Write-Host " 3) 切換翻譯模型為 qwen3.5:4b（顯示記憶體不足時用）"
-    Write-Host " 4) 切換翻譯模型為 qwen3.5:9b（預設，品質較好）"
-    Write-Host " 5) 開啟安裝說明 INSTALL_GUIDE.md"
-    Write-Host "    （每次啟動會自動檢查更新；按「結束」關閉程式就會釋放顯示卡）" -ForegroundColor DarkGray
-    Write-Host " 0) 離開"
-    Write-Host "    目前翻譯模型：$(Get-LauncherModel -Path $ModelFile)" -ForegroundColor DarkGray
-    $choice = Read-Host "請輸入數字（直接按 Enter = 啟動）"
-    Invoke-Choice $choice
+    $r = $null
+    if (-not $useText) {
+        try {
+            $r = Show-LauncherWindow -Root $Root -CurrentModel (Get-LauncherModel -Path $ModelFile)
+        } catch {
+            Write-Host "[注意] 啟動視窗無法開啟（$($_.Exception.Message)），改用文字選單。" -ForegroundColor Yellow
+            $useText = $true
+        }
+    }
+    if ($useText) { $r = Show-TextMenu }
+    switch ($r.Action) {
+        "start"  { & $StartScript }
+        "verify" { & $VerifyScript; [void](Read-Host "按 Enter 回到選單") }
+        "guide"  { Start-Process $GuideFile }
+        "switch" { Switch-Model $r.Model; [void](Read-Host "按 Enter 回到選單") }
+        "none"   { }
+        default  { exit 0 }
+    }
 }
