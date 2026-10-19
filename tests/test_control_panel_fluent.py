@@ -188,3 +188,25 @@ def test_no_hand_written_stylesheet_colors():
     src = (ROOT / "control_panel.py").read_text(encoding="utf-8")
     assert "setStyleSheet(" not in src
     assert not re.search(r"#[0-9a-fA-F]{3,6}\b", src.replace("#!", "")), "hex colour literal left in control_panel.py"
+
+
+def test_home_status_from_worker_thread_is_marshalled(qapp):
+    """Calls from the ASR / translation threads must not touch widgets directly."""
+    import threading
+
+    from PyQt6.QtCore import QEventLoop, QTimer
+
+    p = _panel(qapp)
+    done = threading.Event()
+
+    def worker():
+        p.update_home_status(asr_ms=77, tl_ms=88)
+        done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    assert done.wait(5)
+    loop = QEventLoop()
+    QTimer.singleShot(200, loop.quit)
+    loop.exec()  # let the queued signal reach the GUI thread
+    assert "77" in p._home_asr_card.contentLabel.text()
+    assert "88" in p._home_tl_card.contentLabel.text()

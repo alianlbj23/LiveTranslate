@@ -171,6 +171,9 @@ class ControlPanel(FluentWindow):
     # Home page: big start / stop button (main.py wires these to the pipeline)
     start_requested = pyqtSignal()
     stop_requested = pyqtSignal()
+    # update_home_status() may be called from the ASR / translation threads; the
+    # widget updates must run on the GUI thread, so they travel through this signal
+    _home_status_signal = pyqtSignal(object)
 
     def __init__(self, config, saved_settings=None):
         # Dark theme + UI font for every Fluent widget created from here on.
@@ -286,6 +289,7 @@ class ControlPanel(FluentWindow):
 
         self._bench_result.connect(self._on_bench_result)
         self._cache_result.connect(self._on_cache_result)
+        self._home_status_signal.connect(self._apply_home_status)
 
         self._save_timer = QTimer()
         self._save_timer.setSingleShot(True)
@@ -376,7 +380,18 @@ class ControlPanel(FluentWindow):
         return f"{v:.0f} ms"
 
     def update_home_status(self, running=None, asr_engine=None, model_name=None, asr_ms=None, tl_ms=None):
-        """Feed live state into the home page (any argument may be omitted)."""
+        """Feed live state into the home page (any argument may be omitted).
+        Thread-safe: callers on worker threads are marshalled to the GUI thread."""
+        self._home_status_signal.emit(
+            {"running": running, "asr_engine": asr_engine, "model_name": model_name, "asr_ms": asr_ms, "tl_ms": tl_ms}
+        )
+
+    def _apply_home_status(self, state: dict):
+        running = state.get("running")
+        asr_engine = state.get("asr_engine")
+        model_name = state.get("model_name")
+        asr_ms = state.get("asr_ms")
+        tl_ms = state.get("tl_ms")
         if running is not None:
             self._home_running = bool(running)
             self._home_toggle_btn.setText(t("home_stop") if self._home_running else t("home_start"))
