@@ -597,6 +597,9 @@ class DragHandle(QWidget):
 
     settings_clicked = pyqtSignal()
     subtitle_clicked = pyqtSignal()
+    subtitle_lock_toggled = pyqtSignal(bool)
+    subtitle_click_through_toggled = pyqtSignal(bool)
+    subtitle_settings_requested = pyqtSignal()
     click_through_toggled = pyqtSignal(bool)
     topmost_toggled = pyqtSignal(bool)
     auto_scroll_toggled = pyqtSignal(bool)
@@ -658,6 +661,30 @@ class DragHandle(QWidget):
         self._subtitle_btn = _btn(t("subtitle"))
         self._subtitle_btn.clicked.connect(self.subtitle_clicked.emit)
         row1.addWidget(self._subtitle_btn)
+
+        # Subtitle window options: lock position / click-through / settings
+        self._subtitle_menu_btn = _btn("\u25be", t("subwin_menu_tip"))
+        self._subtitle_menu_btn.setFixedWidth(16)
+        self._subtitle_menu = QMenu(self._subtitle_menu_btn)
+        self._subtitle_lock_action = self._subtitle_menu.addAction(t("subwin_menu_lock"))
+        self._subtitle_lock_action.setCheckable(True)
+        self._subtitle_lock_action.triggered.connect(
+            lambda checked: self.subtitle_lock_toggled.emit(bool(checked))
+        )
+        self._subtitle_ct_action = self._subtitle_menu.addAction(t("subwin_menu_click_through"))
+        self._subtitle_ct_action.setCheckable(True)
+        self._subtitle_ct_action.triggered.connect(
+            lambda checked: self.subtitle_click_through_toggled.emit(bool(checked))
+        )
+        self._subtitle_menu.addSeparator()
+        self._subtitle_settings_action = self._subtitle_menu.addAction(t("subwin_menu_settings"))
+        self._subtitle_settings_action.triggered.connect(self.subtitle_settings_requested.emit)
+        self._subtitle_menu_btn.clicked.connect(
+            lambda: self._subtitle_menu.exec(
+                self._subtitle_menu_btn.mapToGlobal(QPoint(0, self._subtitle_menu_btn.height()))
+            )
+        )
+        row1.addWidget(self._subtitle_menu_btn)
 
         self._running = False
         self._start_stop_btn = _btn(t("paused"))
@@ -864,12 +891,18 @@ class DragHandle(QWidget):
         self._row2_widget.setVisible(not compact)
         self._clear_btn.setVisible(not compact)
         self._subtitle_btn.setVisible(not compact)
+        self._subtitle_menu_btn.setVisible(not compact)
         self._mode_btn.setText(t("mode_compact") if compact else t("mode_full"))
         self.setFixedHeight(24 if compact else 62)
 
     def set_mode(self, mode: str):
         if mode != self._mode:
             self._apply_mode(mode)
+
+    def set_subtitle_lock_state(self, locked: bool, click_through: bool):
+        """Sync the dropdown's check marks from the real window state (no signals)."""
+        self._subtitle_lock_action.setChecked(bool(locked))
+        self._subtitle_ct_action.setChecked(bool(click_through))
 
     def set_subtitle_checked(self, checked: bool):
         self._subtitle_btn.setStyleSheet(
@@ -900,6 +933,9 @@ class SubtitleOverlay(QWidget):
     hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     subtitle_toggled = pyqtSignal()
+    subtitle_lock_toggled = pyqtSignal(bool)
+    subtitle_click_through_toggled = pyqtSignal(bool)
+    subtitle_settings_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
 
@@ -962,6 +998,9 @@ class SubtitleOverlay(QWidget):
         self._handle = DragHandle()
         self._handle.settings_clicked.connect(self.settings_requested.emit)
         self._handle.subtitle_clicked.connect(self.subtitle_toggled.emit)
+        self._handle.subtitle_lock_toggled.connect(self.subtitle_lock_toggled.emit)
+        self._handle.subtitle_click_through_toggled.connect(self.subtitle_click_through_toggled.emit)
+        self._handle.subtitle_settings_requested.connect(self.subtitle_settings_requested.emit)
         self._handle.click_through_toggled.connect(self._set_click_through)
         self._handle.topmost_toggled.connect(self._set_topmost)
         self._handle.taskbar_toggled.connect(self._set_taskbar)
@@ -1129,6 +1168,9 @@ class SubtitleOverlay(QWidget):
 
     def set_subtitle_checked(self, checked: bool):
         self._handle.set_subtitle_checked(checked)
+
+    def set_subtitle_lock_state(self, locked: bool, click_through: bool):
+        self._handle.set_subtitle_lock_state(locked, click_through)
 
     @pyqtSlot(float, float, object)
     def _on_update_monitor(self, rms: float, vad_conf: float, mic_rms):

@@ -29,7 +29,9 @@ from PyQt6.QtGui import (
     QBrush,
     QPixmap,
 )
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QApplication, QMenu, QWidget, QVBoxLayout
+
+from i18n import t
 
 # Win32 extended window style bits for OS-level mouse click-through (same
 # mechanism as the main overlay): a window with WS_EX_TRANSPARENT passes clicks
@@ -65,6 +67,8 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
     # Lower = subtitles keep up with fast talkers; pair with "sentences": 2.
     "min_display_ms": 1500,
     "click_through": False,
+    # Lock position/size without click-through: clicks still hit the window, but it cannot be dragged or resized
+    "locked": False,
     "lines": [
         {
             "type": "original",
@@ -531,6 +535,9 @@ class SubtitleWindow(QWidget):
     window_closed = pyqtSignal()
     # Emitted when the user double-clicks to lock the window (main syncs tray/settings)
     click_through_requested = pyqtSignal(bool)
+    # Right-click menu: lock position toggle and open settings (main syncs state)
+    lock_requested = pyqtSignal(bool)
+    settings_requested = pyqtSignal()
     # Live preview of the sentence being spoken: (original, provisional translation, flags)
     live_signal = pyqtSignal(str, str, int, int)
 
@@ -549,6 +556,7 @@ class SubtitleWindow(QWidget):
         self._hover = False
         self._bg_pixmap = None
         self._click_through = bool(self._settings.get("click_through", False))
+        self._locked = bool(self._settings.get("locked", False))
         # Qt clears the extended style on show/raise/flag changes, so re-assert it
         # on a timer rather than only once.
         self._ct_timer = QTimer(self)
@@ -751,6 +759,7 @@ class SubtitleWindow(QWidget):
         self._apply_background()
         self._refresh_display()
         self.set_click_through(self._settings.get("click_through", False))
+        self.set_locked(self._settings.get("locked", False))
 
         # Reset auto-hide timer with new settings
         self._restart_auto_hide_timer()
@@ -825,6 +834,41 @@ class SubtitleWindow(QWidget):
     def is_click_through(self) -> bool:
         return self._click_through
 
+    def set_locked(self, enabled: bool):
+        """Lock position and width (independent of click-through)."""
+        self._locked = bool(enabled)
+        self._settings["locked"] = self._locked
+        self._drag_pos = None
+        self._resize_start = None
+        if self._locked:
+            self.unsetCursor()
+        self._update_edit_frame()
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+    def _build_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        lock = menu.addAction(t("subwin_menu_lock"))
+        lock.setCheckable(True)
+        lock.setChecked(self._locked)
+        lock.triggered.connect(lambda checked: self.lock_requested.emit(bool(checked)))
+        ct = menu.addAction(t("subwin_menu_click_through"))
+        ct.setCheckable(True)
+        ct.setChecked(self._click_through)
+        ct.triggered.connect(lambda checked: self.click_through_requested.emit(bool(checked)))
+        menu.addSeparator()
+        settings = menu.addAction(t("subwin_menu_settings"))
+        settings.triggered.connect(self.settings_requested.emit)
+        hide = menu.addAction(t("subwin_menu_hide"))
+        hide.triggered.connect(self.close)
+        return menu
+
+    def contextMenuEvent(self, event):
+        if self._click_through:
+            return
+        self._build_context_menu().exec(event.globalPos())
+
     def _apply_click_through(self):
         try:
             hwnd = int(self.winId())
@@ -859,7 +903,7 @@ class SubtitleWindow(QWidget):
         return None
 
     def _update_cursor(self, pos):
-        if self._click_through:
+        if self._click_through or self._locked:
             self.unsetCursor()
             return
         zone = self._edge_zone(pos)
@@ -874,7 +918,7 @@ class SubtitleWindow(QWidget):
         if not hasattr(self, "_edit_frame"):
             return
         self._edit_frame.setGeometry(self.rect())
-        show = self._hover and not self._click_through
+        show = self._hover and not self._click_through and not self._locked
         self._edit_frame.setVisible(show)
         if show:
             self._edit_frame.raise_()
@@ -895,7 +939,7 @@ class SubtitleWindow(QWidget):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
-        if event.button() & self._DRAG_BUTTONS and not self._click_through:
+        if event.button() & self._DRAG_BUTTONS and not self._click_through and not self._locked:
             local = event.position().toPoint()
             if event.button() == Qt.MouseButton.LeftButton and self._edge_zone(local):
                 self._resize_start = (event.globalPosition().toPoint().x(), self.width())
@@ -939,7 +983,7 @@ class SubtitleWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         # Double-click = lock in place: enable click-through so the mouse passes through
-        if event.button() == Qt.MouseButton.LeftButton and not self._click_through:
+        if event.button() == Qt.MouseButton.LeftButton and not self._click_through and not self._locked:
             self._drag_pos = None
             self._resize_start = None
             self._settings["click_through"] = True

@@ -2128,6 +2128,7 @@ def main():
         sm["window_x"] = pos.x()
         sm["window_y"] = pos.y()
         sm["window_width"] = subwin.width()
+        sm["locked"] = subwin.is_locked()
         settings["subtitle_mode"] = sm
         panel._current_settings["subtitle_mode"] = sm
         _save_settings(settings)
@@ -2195,11 +2196,43 @@ def main():
         w._click_through_check.setChecked(checked)
         w._click_through_check.blockSignals(False)
         w._settings["click_through"] = checked
+        overlay.set_subtitle_lock_state(subwin.is_locked(), bool(checked))
 
     subwin_ct_action.toggled.connect(on_toggle_subwin_ct)
     # Double-click on the subtitle window locks it (click-through); mirror into the tray toggle
     subwin.click_through_requested.connect(subwin_ct_action.setChecked)
     menu.addAction(subwin_ct_action)
+
+    # Lock position (no click-through): from the window's right-click menu or the overlay's 字幕 dropdown
+    def on_toggle_subwin_lock(checked):
+        subwin.set_locked(checked)
+        settings = panel.get_settings()
+        sm = settings.get("subtitle_mode") or {}
+        sm["locked"] = bool(checked)
+        settings["subtitle_mode"] = sm
+        panel._current_settings["subtitle_mode"] = sm
+        _save_settings(settings)
+        overlay.set_subtitle_lock_state(bool(checked), subwin.is_click_through())
+
+    def _open_subtitle_settings():
+        from PyQt6.QtWidgets import QTabWidget
+
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+        tabs = panel.findChild(QTabWidget)
+        if tabs is not None:
+            for i in range(tabs.count()):
+                if tabs.tabText(i) == t("tab_subtitle"):
+                    tabs.setCurrentIndex(i)
+                    break
+
+    subwin.lock_requested.connect(on_toggle_subwin_lock)
+    subwin.settings_requested.connect(_open_subtitle_settings)
+    overlay.subtitle_lock_toggled.connect(on_toggle_subwin_lock)
+    overlay.subtitle_click_through_toggled.connect(subwin_ct_action.setChecked)
+    overlay.subtitle_settings_requested.connect(_open_subtitle_settings)
+    overlay.set_subtitle_lock_state(subwin.is_locked(), subwin_ct_action.isChecked())
 
     # Connect overlay subtitle button
     def _on_overlay_subtitle_toggle():
@@ -2213,6 +2246,7 @@ def main():
         subwin_ct_action.blockSignals(True)
         subwin_ct_action.setChecked(bool(s.get("click_through", False)))
         subwin_ct_action.blockSignals(False)
+        overlay.set_subtitle_lock_state(bool(s.get("locked", False)), bool(s.get("click_through", False)))
 
     panel.subtitle_settings_changed.connect(_on_panel_subtitle_changed)
 
