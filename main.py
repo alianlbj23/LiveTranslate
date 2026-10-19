@@ -1559,7 +1559,7 @@ class LiveTranslateApp:
         self._live_dirty = True
         log.debug(f"Live preview: {text}")
         if self._subwin and self._subwin.isVisible():
-            self._subwin.update_live(text, "")
+            self._subwin.update_live(text)  # keep the current translation until the new one streams in
         self._start_live_worker()
 
     def _start_live_worker(self):
@@ -1580,13 +1580,25 @@ class LiveTranslateApp:
                     # pollute the context used for final translations.
                     translator = self._translator.with_target_language(self._target_language)
                     t0 = time.perf_counter()
-                    out = translator.translate(text, lang)
+                    out = ""
+                    stale = False
+                    # Stream tokens into the subtitle window so the provisional
+                    # translation grows word by word (YouTube-caption feel).
+                    for partial in translator.translate_iter(text, lang):
+                        if seq != self._live_seq:
+                            stale = True
+                            break
+                        out = partial
+                        if self._subwin and self._subwin.isVisible():
+                            self._subwin.update_live(text, partial, final=False)
+                    if stale:
+                        continue
                     log.info(f"Live translate ({(time.perf_counter() - t0) * 1000:.0f}ms): {out}")
                 except Exception as e:
                     log.debug(f"Live preview translate error: {e}")
                     return
                 if seq == self._live_seq and out and self._subwin and self._subwin.isVisible():
-                    self._subwin.update_live(text, out)
+                    self._subwin.update_live(text, out, final=True)
                 # If newer text arrived meanwhile, _live_dirty is True and we loop
         finally:
             self._live_inflight = False

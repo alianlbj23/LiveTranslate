@@ -531,8 +531,8 @@ class SubtitleWindow(QWidget):
     window_closed = pyqtSignal()
     # Emitted when the user double-clicks to lock the window (main syncs tray/settings)
     click_through_requested = pyqtSignal(bool)
-    # Live preview of the sentence being spoken: (original, provisional translation)
-    live_signal = pyqtSignal(str, str)
+    # Live preview of the sentence being spoken: (original, provisional translation, flags)
+    live_signal = pyqtSignal(str, str, int)
 
     _EDGE = 12       # px zone on the right edge used for width resizing
     _CORNER = 18     # px zone at the bottom-right corner
@@ -570,7 +570,7 @@ class SubtitleWindow(QWidget):
         self._live_timer = QTimer(self)
         self._live_timer.setSingleShot(True)
         self._live_timer.setInterval(4000)  # stale preview safety clear
-        self._live_timer.timeout.connect(lambda: self._on_live("", ""))
+        self._live_timer.timeout.connect(lambda: self._on_live("", "", 0))
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
@@ -971,26 +971,64 @@ class SubtitleWindow(QWidget):
             translations = {"": translations}
         self.update_text_signal.emit(original, json.dumps(translations, ensure_ascii=False))
 
-    def update_live(self, original: str, translation: str = ""):
-        """Thread-safe: show/update the sentence still being spoken."""
-        self.live_signal.emit(original or "", translation or "")
+    # live_signal flags
+    _LIVE_HAS_TL = 1   # translation argument carries a value
+    _LIVE_FINAL = 2    # translation is the complete provisional result (end of stream)
+
+    def update_live(self, original: str, translation=None, final: bool = True):
+        """Thread-safe: show/update the sentence still being spoken.
+
+        translation=None keeps whatever translation is currently shown (no "..." blink);
+        final=False marks a streaming partial, which only replaces the shown text
+        when it is at least as long (text grows like YouTube captions, never shrinks).
+        """
+        flags = 0
+        if translation is not None:
+            flags |= self._LIVE_HAS_TL
+        if final:
+            flags |= self._LIVE_FINAL
+        self.live_signal.emit(original or "", translation or "", flags)
 
     def clear_live(self):
-        self.live_signal.emit("", "")
+        self.live_signal.emit("", "", 0)
 
-    @pyqtSlot(str, str)
-    def _on_live(self, original: str, translation: str):
+    @pyqtSlot(str, str, int)
+    def _on_live(self, original: str, translation: str, flags: int):
         if not original:
             if self._live is None:
                 return
             self._live = None
             self._live_timer.stop()
-        else:
-            self._live = (original, translation)
+            self._refresh_display()
+            return
+
+        cur_o, cur_t = self._live if self._live is not None else ("", "")
+        new_o, new_t = cur_o, cur_t
+
+        if original != cur_o:
+            if cur_o and cur_o.startswith(original):
+                # ASR momentarily produced a shorter prefix: keep the longer text (no flicker)
+                new_o = cur_o
+            elif cur_o and (original.startswith(cur_o) or original.startswith(cur_o[:max(4, len(cur_o) // 2)])):
+                # Same sentence growing / being refined: keep the shown translation for now
+                new_o = original
+            else:
+                # A different sentence: reset the translation
+                new_o = original
+                new_t = ""
+
+        if flags & self._LIVE_HAS_TL:
+            if flags & self._LIVE_FINAL or len(translation) >= len(new_t):
+                new_t = translation
+
+        if (new_o, new_t) == (cur_o, cur_t) and self._live is not None:
             self._live_timer.start()
-            if self._is_hidden_by_timeout:
-                self._restore_from_auto_hide()
-            self._restart_auto_hide_timer()
+            return
+        self._live = (new_o, new_t)
+        self._live_timer.start()
+        if self._is_hidden_by_timeout:
+            self._restore_from_auto_hide()
+        self._restart_auto_hide_timer()
         self._refresh_display()
 
     @pyqtSlot(str, str)
