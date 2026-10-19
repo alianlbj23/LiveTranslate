@@ -45,9 +45,19 @@ _REAL_DIGEST = _digest(_REAL_SETTINGS)
 _SANDBOX_DIR = Path(tempfile.mkdtemp(prefix="livetranslate_tests_"))
 _control_panel.SETTINGS_FILE = _SANDBOX_DIR / "user_settings.json"
 
+import local_models as _local_models  # noqa: E402
+
+# Switching models in the app writes launcher/selected_model.txt; keep tests off it too
+_REAL_SELECTED = _ROOT / "launcher" / "selected_model.txt"
+_REAL_SELECTED_DIGEST = _digest(_REAL_SELECTED)
+_local_models.SELECTED_MODEL_FILE = _SANDBOX_DIR / "selected_model.txt"
+
 
 def pytest_sessionfinish(session, exitstatus):
     if _digest(_REAL_SETTINGS) != _REAL_DIGEST:
         print(f"\nERROR: the test run modified the real {_REAL_SETTINGS}")
+        session.exitstatus = 1
+    if _digest(_REAL_SELECTED) != _REAL_SELECTED_DIGEST:
+        print(f"\nERROR: the test run modified the real {_REAL_SELECTED}")
         session.exitstatus = 1
     shutil.rmtree(_SANDBOX_DIR, ignore_errors=True)

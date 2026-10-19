@@ -1,0 +1,33 @@
+{
+  "_comment": "Local (Ollama) translation models offered by the launcher menu and the model combo. Read by local_models.py and launcher/gui.ps1. size_gb = download size.",
+  "default": "qwen3.5:9b",
+  "models": [
+    {
+      "model": "qwen3.5:9b",
+      "label": "Qwen3.5 9B",
+      "size_gb": 6.6,
+      "note": "預設，翻譯品質較好",
+      "settings": {"thinking_style": "openai", "streaming": true, "context_turns": 3}
+    },
+    {
+      "model": "qwen3.5:4b",
+      "label": "Qwen3.5 4B",
+      "size_gb": 3.3,
+      "note": "顯示記憶體不足時用，速度較快",
+      "settings": {"thinking_style": "openai", "streaming": true, "context_turns": 3}
+    },
+    {
+      "model": "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS",
+      "label": "Sakura GalTransl 7B",
+      "size_gb": 4.3,
+      "note": "日翻中專用（遊戲、動漫對話風格）；僅限非商業使用",
+      "settings": {
+        "thinking_style": "off",
+        "streaming": true,
+        "context_turns": 3,
+        "prompt_style": "sakura",
+        "overrides": {"temperature": 0.3, "top_p": 0.8}
+      }
+    }
+  ]
+}

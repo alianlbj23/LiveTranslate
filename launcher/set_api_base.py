@@ -1,27 +1,46 @@
-"""Point the Ollama model entry in user_settings.json at the given API base.
+"""Point the local Ollama model entries in user_settings.json at the launcher's port.
 
-Usage: python -I set_api_base.py <user_settings.json> <api_base> <model_name>
-Only touches model entries whose api_key is "ollama" or whose api_base
-already points at a local Ollama port. Everything else is left as-is.
-An auto-generated display name ("Ollama <model>") follows the model, so the
-overlay's model combo shows what is actually used; custom names are kept.
+Usage: python -I set_api_base.py <user_settings.json> <api_base> <selected_model> [installed,models]
+
+Keeps one entry per installed catalog model (local_models.json) so the model combo can
+switch between them, adds the selected model if missing and makes it active. Cloud and
+custom entries are kept. Without the installed list, Ollama's /api/tags is asked (3 s
+timeout); if that fails, no entry is removed and the selected one is guaranteed.
 """
 import json
 import os
 import re
 import sys
+import urllib.request
 
-# Same rule as launcher/model.ps1 Test-LauncherModelName
-_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-_AUTO_NAME_RE = re.compile(r"^Ollama [A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import local_models  # noqa: E402
+
+
+def _installed_from_ollama(api_base: str):
+    """Installed model names, or None when Ollama could not be asked (nothing is removed then)."""
+    url = local_models.ollama_root(api_base) + "/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return [m["name"] for m in data.get("models", []) if isinstance(m, dict) and isinstance(m.get("name"), str)]
+    except Exception as e:
+        print(f"[set_api_base] could not list installed models ({e}); keeping all entries", file=sys.stderr)
+        return None
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
+    # The launcher reads this output as UTF-8 (Chinese model names, localized OS errors)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError) as e:
+            print(f"[set_api_base] cannot switch output to UTF-8: {e}", file=sys.stderr)
+    if len(sys.argv) not in (4, 5):
         print(__doc__)
         return 2
     path, api_base, model = sys.argv[1:4]
-    if not _MODEL_RE.match(model):
+    if not local_models.MODEL_NAME_RE.match(model):
         print(f"[set_api_base] invalid model name: {model!r}", file=sys.stderr)
         return 2
     if not re.match(r"^https?://[^\s\"']+$", api_base):
@@ -33,34 +52,22 @@ def main() -> int:
     except (OSError, ValueError) as e:
         print(f"[set_api_base] cannot read {os.path.basename(path)}: {e}", file=sys.stderr)
         return 1
-    if not isinstance(data, dict) or not isinstance(data.get("models", []), list):
+    if not isinstance(data, dict):
         print(f"[set_api_base] unexpected structure in {os.path.basename(path)}", file=sys.stderr)
         return 1
 
-    changed = False
-    for m in data.get("models", []):
-        if not isinstance(m, dict):
-            continue
-        is_ollama = m.get("api_key") == "ollama" or ":1143" in str(m.get("api_base", ""))
-        if not is_ollama:
-            continue
-        if m.get("api_base") != api_base:
-            m["api_base"] = api_base
-            changed = True
-        if m.get("model") != model:
-            m["model"] = model
-            changed = True
-        name = str(m.get("name", ""))
-        if _AUTO_NAME_RE.match(name) and name != f"Ollama {model}":
-            m["name"] = f"Ollama {model}"
-            changed = True
-
-    if changed:
+    if len(sys.argv) == 5:
+        installed = [n for n in sys.argv[4].split(",") if local_models.MODEL_NAME_RE.match(n)]
+    else:
+        installed = _installed_from_ollama(api_base)
+    new = local_models.sync_local_models(data, api_base, model, installed)
+    if new != data:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(new, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
-        print(f"[set_api_base] updated api_base -> {api_base}, model -> {model}")
+        names = ", ".join(m.get("name", "?") for m in new["models"] if local_models.is_local_ollama(m))
+        print(f"[set_api_base] api_base -> {api_base}, active -> {model}; local models: {names}")
     return 0
 
 

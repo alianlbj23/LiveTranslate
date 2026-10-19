@@ -76,6 +76,7 @@ function Start-WindowsOllama {
     $env:OLLAMA_KV_CACHE_TYPE   = "q8_0"    # KV cache 量化成 8-bit：顯示記憶體省一半，翻譯品質幾乎無差
     $env:OLLAMA_NUM_PARALLEL    = "2"       # 2 個槽：正式翻譯與即時預覽不互相排隊；KV cache 仍比預設 4 槽省
     $env:OLLAMA_CONTEXT_LENGTH  = "2048"    # 字幕翻譯一次只需幾百個 token，2048 夠用且省顯示記憶體
+    $env:OLLAMA_MAX_LOADED_MODELS = "1"     # 執行中切換翻譯模型時先卸載舊的，兩個模型不會同時擠在顯示卡上
     $p = Start-Process -FilePath $Ollama -ArgumentList "serve" -WindowStyle Hidden -PassThru
     Set-Content -Path $PidFile -Value $p.Id -Encoding ascii
     for ($i = 0; $i -lt 30; $i++) {

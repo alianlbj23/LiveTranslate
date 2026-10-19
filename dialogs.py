@@ -474,8 +474,16 @@ class ModelDownloadDialog(QDialog):
 class ModelEditDialog(QDialog):
     """Dialog for adding/editing a model configuration."""
 
+    # Fields this dialog edits; anything else in the model entry (e.g. prompt_style for
+    # SakuraLLM) is carried over unchanged by get_data()
+    _EDITED_KEYS = frozenset({
+        "name", "api_base", "api_key", "model", "proxy", "no_system_role", "no_think", "thinking_style",
+        "streaming", "json_response", "context_turns", "input_price", "output_price", "overrides", "extra_body",
+    })
+
     def __init__(self, parent=None, model_data=None):
         super().__init__(parent)
+        self._original = dict(model_data) if isinstance(model_data, dict) else {}
         self.setWindowTitle(
             t("dialog_edit_model") if model_data else t("dialog_add_model")
         )
@@ -754,6 +762,9 @@ class ModelEditDialog(QDialog):
         ok, data = self._parse_extra_body()
         if ok and data:
             result["extra_body"] = data
+        for key, value in self._original.items():
+            if key not in self._EDITED_KEYS:
+                result[key] = value
         return result
 
 

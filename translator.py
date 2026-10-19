@@ -50,6 +50,18 @@ DEFAULT_PROMPT = (
     "- Auto-correct likely ASR errors based on context and common sense."
 )
 
+# SakuraLLM (Sakura-GalTransl-7B-v3 model card): fixed Simplified-Chinese system prompt and
+# a user message with 历史翻译 / 术语表 / input. Simplified output is converted to Taiwan
+# usage by the OpenCC post-processing like any other model.
+SAKURA_SYSTEM_PROMPT = (
+    "你是一个视觉小说翻译模型，可以通顺地使用给定的术语表以指定的风格将日文翻译成简体中文，"
+    "并联系上下文正确使用人称代词，注意不要混淆使役态和被动态的主语和宾语，"
+    "不要擅自添加原文中没有的特殊符号，也不要擅自增加或减少换行。"
+)
+SAKURA_GLOSSARY_LINE = "参考以下术语表（可为空，格式为src->dst #备注）："
+SAKURA_TASK_LINE = "根据以上术语表的对应关系和备注，结合历史剧情和上下文，将下面的文本从日文翻译成简体中文："
+PROMPT_STYLES = ("sakura",)
+
 PROMPT_PRESETS = {
     "daily": (
         "You are a real-time subtitle translator for casual conversation. "
@@ -204,6 +216,7 @@ class Translator:
         extra_body=None,
         thinking_style=None,
         zh_tw_postprocess=False,
+        prompt_style=None,
     ):
         self._client = make_openai_client(api_base, api_key, proxy, timeout=timeout)
         # Guarantee Traditional Chinese (Taiwan wording) output via OpenCC s2twp,
@@ -250,6 +263,10 @@ class Translator:
         self._system_prompt_template = system_prompt or DEFAULT_PROMPT
         self._context_turns = 0
         self._history = []  # list of (source_text, translated_text)
+        if prompt_style is not None and prompt_style not in PROMPT_STYLES:
+            log.warning(f"Unknown prompt_style {prompt_style!r}, using the normal prompt")
+            prompt_style = None
+        self._prompt_style = prompt_style  # "sakura" = SakuraLLM prompt format
         self._last_prompt_tokens = 0
         self._last_completion_tokens = 0
 
@@ -301,6 +318,7 @@ class Translator:
         t._system_prompt_template = self._system_prompt_template
         t._zh_tw_postprocess = self._zh_tw_postprocess
         t._opencc = self._opencc
+        t._prompt_style = self._prompt_style
         t._context_turns = 0
         t._history = []
         t._last_prompt_tokens = 0
@@ -319,7 +337,13 @@ class Translator:
             log.warning(f"zh-TW post-processing failed: {e}")
             return text
 
+    def _sakura_active(self) -> bool:
+        # Sakura only translates into Chinese; other targets keep the normal prompt
+        return self._prompt_style == "sakura" and str(self._target_language).lower().startswith("zh")
+
     def _build_system_prompt(self, source_lang):
+        if self._sakura_active():
+            return SAKURA_SYSTEM_PROMPT
         src = LANGUAGE_DISPLAY.get(source_lang, source_lang)
         tgt = LANGUAGE_DISPLAY.get(self._target_language, self._target_language)
         try:
@@ -336,6 +360,12 @@ class Translator:
         return prompt
 
     def _build_messages(self, system_prompt, text):
+        if self._sakura_active():
+            lines = []
+            if self._context_turns > 0 and self._history:
+                lines.append("历史翻译：" + "\n".join(tgt for _src, tgt in self._history[-self._context_turns:]))
+            lines += [SAKURA_GLOSSARY_LINE, "", SAKURA_TASK_LINE, text]
+            return [{"role": "system", "content": system_prompt}, {"role": "user", "content": "\n".join(lines)}]
         if self._no_system_role:
             msgs = [{"role": "user", "content": f"{system_prompt}\n{text}"}]
         else:

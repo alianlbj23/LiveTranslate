@@ -6,8 +6,10 @@ Real-time audio translation using WASAPI loopback + faster-whisper + LLM.
 import sys
 import signal
 import logging
+import json
 import threading
 import traceback
+import urllib.request
 import queue
 import gc
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +47,7 @@ from audio_capture import AudioCapture
 from vad_processor import VADProcessor
 from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
 from translator import Translator, RepetitionError
+import local_models
 from transcript_writer import TranscriptWriter
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
@@ -175,6 +178,27 @@ class _TrayNotifier(QObject):
     @pyqtSlot(str, str)
     def _show(self, title: str, text: str):
         self._tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Warning, 10000)
+
+
+def _warm_local_model_now(model_config: dict):
+    """Ask the local Ollama to load the model (keep_alive 30m). With
+    OLLAMA_MAX_LOADED_MODELS=1 (launcher) it unloads the previous model first."""
+    model = model_config.get("model")
+    url = local_models.ollama_root(model_config.get("api_base", "")) + "/api/generate"
+    body = json.dumps({"model": model, "keep_alive": "30m"}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            resp.read()
+        log.info(f"Translation model loaded: {model} ({(time.perf_counter() - t0) * 1000:.0f} ms)")
+    except Exception as e:
+        log.warning(f"Could not warm up translation model {model}: {e}")
+
+
+def _warm_local_model(model_config: dict):
+    threading.Thread(target=_warm_local_model_now, args=(dict(model_config),),
+                     name="WarmTranslationModel", daemon=True).start()
 
 
 class LiveTranslateApp:
@@ -538,7 +562,13 @@ class LiveTranslateApp:
             overrides=model_config.get("overrides"),
             extra_body=model_config.get("extra_body"),
             zh_tw_postprocess=self._config["translation"].get("zh_tw_postprocess", False),
+            prompt_style=model_config.get("prompt_style"),
         )
+        # Next launch starts with the same local model; load it now so the first
+        # sentence after switching does not wait for the model to load
+        local_models.remember_selected(model_config)
+        if local_models.is_local_ollama(model_config):
+            _warm_local_model(model_config)
         context_turns = model_config.get(
             "context_turns", self._config["translation"].get("context_window", 0)
         )
