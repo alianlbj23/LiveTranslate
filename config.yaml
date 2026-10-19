@@ -34,7 +34,10 @@ asr:
     initial_prompt: ""
     # Optional comma-separated names/terms to bias recognition towards (streamer names, game terms)
     hotwords: ""
-    # Known Whisper hallucinations on silence / BGM: a segment equal to one of these is discarded
+    # Known Whisper hallucinations on silence / BGM: a segment equal to one of these is discarded.
+    # Whisper is just as confident on these as on real speech, so only list boilerplate a
+    # streamer practically never says as a whole segment; everyday phrases such as
+    # ありがとうございました / おやすみなさい must not be here (they would be dropped when said).
     hallucination_phrases:
       - "ご視聴ありがとうございました"
       - "ご視聴ありがとうございます"
@@ -42,8 +45,6 @@ asr:
       - "チャンネル登録お願いします"
       - "最後までご視聴いただきありがとうございました"
       - "字幕をご利用いただきありがとうございます"
-      - "おやすみなさい"
-      - "ありがとうございました"
       - "Thank you for watching"
       - "Thanks for watching"
       - "优优独播剧场——YoYo Television Series Exclusive"
