@@ -204,6 +204,10 @@ def _app(asr_text="", live_text="", seq=5):
     app._live_lang = "ja"
     app._live_dirty = bool(live_text)
     app._live_inflight = False
+    app._tl_inflight = 0
+    app._tl_backlog_threshold = 6
+    app._tl_backlog_last_warn = 0.0
+    app._tl_backlog_callback = None
     app._interim_interval = 0.5
     app._interim_pending = ""
     app._interim_active = False

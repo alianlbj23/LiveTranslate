@@ -144,6 +144,7 @@ testing: "测试中..."
 
 # 缓存标签页
 mem_warning_msg: "内存占用 {rss}MB 超过阈值, 建议重启 LiveTranslate 释放 ASR 引擎的累积缓存"
+tl_backlog_msg: "有 {n} 句翻译在排队：模型回应非常慢，通常是显存被占满。请关闭其他使用显卡的程序（动态壁纸、游戏、多余的浏览器分页）或改用 qwen3.5:4b。"
 group_transcript: "转录持久化"
 label_auto_save_transcript: "自动保存识别结果到 transcripts/ 文件夹"
 auto_save_transcript_tooltip: "每次会话开启时新建 3 份文件 (原文/译文/全部), 实时追加写入, 不受悬浮窗 50 条上限影响"

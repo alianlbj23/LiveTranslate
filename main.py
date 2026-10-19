@@ -229,6 +229,12 @@ class LiveTranslateApp:
         self._asr_thread = None
         self._asr_queue = queue.Queue(maxsize=16)
         self._tl_executor = ThreadPoolExecutor(max_workers=8)
+        # Translation backlog guard: when requests pile up the LLM is crawling
+        # (usually VRAM pressure); warn the user instead of silently queueing
+        self._tl_inflight = 0
+        self._tl_backlog_threshold = 6
+        self._tl_backlog_last_warn = 0.0
+        self._tl_backlog_callback = None
 
         self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
 
@@ -1094,6 +1100,45 @@ class LiveTranslateApp:
                     self._total_completion_tokens * self._output_price) / 1_000_000
         return 0.0
 
+    def set_translation_backlog_callback(self, callback):
+        self._tl_backlog_callback = callback
+
+    def _submit_translation(self, msg_id, text, source_lang, extra_langs=None):
+        """Queue a translation and track how many are in flight."""
+        self._tl_inflight += 1
+        self._check_translation_backlog()
+        try:
+            self._tl_executor.submit(
+                self._translate_async_tracked, msg_id, text, source_lang, extra_langs
+            )
+        except RuntimeError:
+            self._tl_inflight = max(0, self._tl_inflight - 1)
+            raise
+
+    def _translate_async_tracked(self, msg_id, text, source_lang, extra_langs=None):
+        try:
+            self._translate_async(msg_id, text, source_lang, extra_langs)
+        finally:
+            self._tl_inflight = max(0, self._tl_inflight - 1)
+
+    def _check_translation_backlog(self):
+        n = self._tl_inflight
+        if n < self._tl_backlog_threshold:
+            return
+        now = time.monotonic()
+        if now - self._tl_backlog_last_warn < 30.0:
+            return
+        self._tl_backlog_last_warn = now
+        log.warning(
+            f"Translation backlog: {n} requests in flight; the LLM is answering slowly "
+            "(GPU memory pressure? other apps using the GPU?)"
+        )
+        if self._tl_backlog_callback:
+            try:
+                self._tl_backlog_callback(n)
+            except Exception:
+                log.warning("translation backlog callback failed", exc_info=True)
+
     def _translate_async(self, msg_id, text, source_lang, extra_langs=None):
         """Translate text and update UI with streaming display."""
         try:
@@ -1366,10 +1411,7 @@ class LiveTranslateApp:
                     self._subwin.update_text(original_text, {target_lang: original_text})
         else:
             try:
-                self._tl_executor.submit(
-                    self._translate_async, msg_id, original_text, source_lang,
-                    extra_langs or None,
-                )
+                self._submit_translation(msg_id, original_text, source_lang, extra_langs or None)
             except RuntimeError:
                 log.warning("Translation executor shut down, skipping")
 
@@ -1719,7 +1761,7 @@ class LiveTranslateApp:
                     self._subwin.update_text(original_text, {target_lang: original_text})
         else:
             try:
-                self._tl_executor.submit(self._translate_async, msg_id, original_text, source_lang, extra_langs or None)
+                self._submit_translation(msg_id, original_text, source_lang, extra_langs or None)
             except RuntimeError:
                 log.warning("Translation executor shut down, skipping")
     def _process_interim_final(self, speech_segment):
@@ -2521,6 +2563,16 @@ def main():
         )
 
     live_trans.set_memory_warning_callback(_on_memory_warning)
+
+    def _on_translation_backlog(n: int):
+        tray.showMessage(
+            "LiveTranslate",
+            t("tl_backlog_msg").format(n=int(n)),
+            QSystemTrayIcon.MessageIcon.Warning,
+            10000,
+        )
+
+    live_trans.set_translation_backlog_callback(_on_translation_backlog)
 
     QTimer.singleShot(500, on_start)
 

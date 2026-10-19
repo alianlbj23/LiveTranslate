@@ -72,6 +72,8 @@ function Start-WindowsOllama {
     $env:OLLAMA_KEEP_ALIVE      = "30m"     # 閒置 30 分鐘才卸載（正常結束時會立刻釋放，這是保險）
     $env:OLLAMA_FLASH_ATTENTION = "1"       # 省顯示記憶體、提示詞處理較快
     $env:OLLAMA_KV_CACHE_TYPE   = "q8_0"    # KV cache 量化成 8-bit：顯示記憶體省一半，翻譯品質幾乎無差
+    $env:OLLAMA_NUM_PARALLEL    = "1"       # 一次只處理一個請求：KV cache 只配置一份，請求排隊而不是搶 GPU
+    $env:OLLAMA_CONTEXT_LENGTH  = "2048"    # 字幕翻譯一次只需幾百個 token，2048 夠用且省顯示記憶體
     $p = Start-Process -FilePath $Ollama -ArgumentList "serve" -WindowStyle Hidden -PassThru
     Set-Content -Path $PidFile -Value $p.Id -Encoding ascii
     for ($i = 0; $i -lt 30; $i++) {
@@ -96,6 +98,12 @@ if (-not (Test-Path $Python)) {
 
 # ---- Step 0: 自動更新（離線或本機有修改時略過，永不擋啟動） ----
 if (Test-Path $UpdateScript) { & $UpdateScript }
+
+# ---- Step 0b: 顯示記憶體檢查 ----
+. (Join-Path $Root "launcher\vram.ps1")
+$freeMB = Get-FreeVramMB
+if ($freeMB -ge 0) { Write-Info ("可用顯示記憶體 {0:N1} GB" -f ($freeMB / 1024)) }
+Test-LowVram -FreeMB $freeMB | Out-Null
 
 # ---- Step 1: Ollama ----
 $Port = 11434

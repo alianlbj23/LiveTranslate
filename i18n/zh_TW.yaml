@@ -144,6 +144,7 @@ testing: "測試中..."
 
 # 快取分頁
 mem_warning_msg: "記憶體佔用 {rss}MB 超過閾值, 建議重新啟動 LiveTranslate 釋放 ASR 引擎的累積快取"
+tl_backlog_msg: "有 {n} 句翻譯在排隊：模型回應非常慢，通常是顯示記憶體被佔滿。請關閉其他使用顯示卡的程式（動態桌布、遊戲、多餘的瀏覽器分頁）或改用 qwen3.5:4b。"
 group_transcript: "逐字稿儲存"
 label_auto_save_transcript: "自動儲存識別結果到 transcripts/ 資料夾"
 auto_save_transcript_tooltip: "每次會話開啟時新建 3 份檔案 (原文/譯文/全部), 即時追加寫入, 不受懸浮窗 50 條上限影響"

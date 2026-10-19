@@ -190,6 +190,9 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | Ollama `OLLAMA_KEEP_ALIVE=30m` | 閒置 5 分鐘卸載 | **閒置 30 分鐘才卸載** | 直播安靜一陣後第一句不用等 10–30 秒重載；程式正常結束時會立刻釋放（見下） |
 | **關閉即釋放顯示卡** | 無 | **有** | 結束 LiveTranslate 時程式會呼叫 Ollama 卸載翻譯模型，啟動腳本接著關閉自己開的 Ollama 服務；Whisper 子程序隨程式結束釋放。另有隱藏的看門狗（`launcher\gpu_watchdog.ps1`，紀錄在 `logs\gpu_watchdog.log`）：直接叉掉黑色視窗或程式當掉時，它會在幾秒內卸載模型並關閉 Ollama；最後的保險是 30 分鐘閒置自動卸載 |
 | Ollama `OLLAMA_FLASH_ATTENTION=1` | 關 | **開** | 省顯示記憶體、提示詞處理較快 |
+| Ollama `OLLAMA_NUM_PARALLEL=1`、`OLLAMA_CONTEXT_LENGTH=2048` | 4 個平行槽、4096 context | **1 槽、2048** | KV cache 省約 1 GB；請求排隊而不是同時搶 GPU（翻譯一次只需幾百個 token） |
+| 翻譯總時間硬上限 | 只有「完全沒回應」才逾時 | **超過 `timeout` 秒就切斷** | 顯示記憶體被擠爆時模型會「每幾秒滴一個字」，以前會無聲地卡住；現在會記警告、跳過那句，並在排隊超過 6 句時跳出系統匣提示 |
+| 啟動前檢查可用顯示記憶體 | 無 | **低於 8 GB 提示** | 提醒關閉 Wallpaper Engine／遊戲或改用 4b |
 | 啟動時預先載入翻譯模型 | 無 | **有**（與載入 Whisper 同時進行） | 第一句就是正常速度 |
 | VAD 靜音判定 `silence_mode` / `silence_duration` | auto（0.3–2.0 秒自適應） | **fixed 0.5 秒** | 講完停 0.5 秒就送出，不會等到 2 秒；代價是長句較容易被切成兩段 |
 | `min_speech_duration` | 1.0 s | **0.6 s** | 短句（「はい」「やばい」）不用等併入下一句 |
@@ -352,6 +355,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 
 ### 常見問題
 
+- **翻譯到一半卡住（有辨識、沒翻譯、也沒錯誤）**：2026-10-19 實際發生過。當時顯示記憶體 11.35 / 12.2 GB（翻譯 5.3 + 語音 1.5 + 桌面程式 4.5 GB），Windows 把顯示卡記憶體換到系統記憶體，模型變成幾秒才吐一個字。現在程式會在超過 `timeout` 秒時切斷並記警告、排隊超過 6 句會跳系統匣提示、啟動前會檢查可用顯示記憶體；根本解法仍是關掉其他吃顯示卡的程式或改用 4b。
 - **顯示記憶體不足 / 翻譯變很慢**：實測在桌面開了很多程式（Chrome、Discord、Steam、Wallpaper Engine 等已吃 3.7 GB）時，Whisper turbo + qwen3.5:9b 會用到 11.6 / 12.2 GB，非常接近上限。先關掉 Wallpaper Engine、多餘的 Chrome 分頁；仍不夠就用 `LiveTranslate.bat` → 3 換成 `qwen3.5:4b`（約 3 GB VRAM）。
 - **玩遊戲時不能同時使用**：遊戲本身會吃掉大部分 VRAM，Ollama 會被迫改用 CPU/RAM，翻譯延遲變成 10 秒以上甚至失敗。玩遊戲前先結束 LiveTranslate（按「結束」或直接叉掉黑色視窗都會自動釋放顯示記憶體）。
 - **背景音樂太大聲、辨識出奇怪的句子**（實測在沒人講話時辨識出「ご視聴ありがとうございました」）：這是 Whisper 對音樂/靜音的幻覺。調高 Settings → VAD / ASR → Silero VAD 閾值 到 0.5–0.6；或把引擎換成 Anime-Whisper（對日文配音較穩）；YouTube 端調低背景音樂無法做到，只能靠 VAD。

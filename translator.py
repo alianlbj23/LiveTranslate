@@ -1,6 +1,6 @@
 import json
 import logging
-import time
+import threading
 
 import httpx
 from openai import OpenAI
@@ -103,6 +103,11 @@ def make_openai_client(
     api_base: str, api_key: str, proxy: str = "none", timeout=None
 ) -> OpenAI:
     kwargs = {"base_url": api_base, "api_key": api_key}
+    host = str(api_base).split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    if host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+        # Local servers (Ollama, LM Studio): a retry only multiplies a stall caused by
+        # VRAM pressure by 3x. Fail fast so the pipeline can log and move on.
+        kwargs["max_retries"] = 0
     if timeout is not None:
         kwargs["timeout"] = httpx.Timeout(timeout, connect=5.0)
     if proxy == "system":
@@ -425,14 +430,8 @@ class Translator:
         except Exception:
             stream = self._client.chat.completions.create(**base_kwargs)
 
-        deadline = time.monotonic() + self._timeout
         chunks = []
-        for chunk in stream:
-            if time.monotonic() > deadline:
-                stream.close()
-                raise TimeoutError(
-                    f"Translation exceeded {self._timeout}s total timeout"
-                )
+        for chunk in self._stream_with_deadline(stream):
             if hasattr(chunk, "usage") and chunk.usage:
                 self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
                 self._last_completion_tokens = chunk.usage.completion_tokens or 0
@@ -482,6 +481,40 @@ class Translator:
                 return True
         return False
 
+    def _stream_with_deadline(self, stream):
+        """Iterate a streaming response under a hard wall-clock limit.
+
+        The per-read socket timeout only fires when nothing arrives at all; a server
+        that trickles a token every few seconds (GPU memory swapped out) would keep a
+        translation alive for minutes. A timer closes the stream at self._timeout so
+        the caller gets a TimeoutError promptly and the sentence is skipped.
+        """
+        timed_out = threading.Event()
+
+        def _cut():
+            timed_out.set()
+            try:
+                stream.close()
+            except Exception as e:  # closing an already-finished stream is harmless
+                log.debug(f"stream close after deadline: {e}")
+
+        timer = threading.Timer(self._timeout, _cut)
+        timer.daemon = True
+        timer.start()
+        try:
+            for chunk in stream:
+                if timed_out.is_set():
+                    break
+                yield chunk
+        except Exception:
+            if timed_out.is_set():
+                raise TimeoutError(f"Translation exceeded {self._timeout}s total timeout")
+            raise
+        finally:
+            timer.cancel()
+        if timed_out.is_set():
+            raise TimeoutError(f"Translation exceeded {self._timeout}s total timeout")
+
     def _translate_sync(self, system_prompt, text):
         kwargs = self._build_request_kwargs(system_prompt, text, stream=False)
         resp = self._client.chat.completions.create(**kwargs)
@@ -508,14 +541,8 @@ class Translator:
         except Exception:
             stream = self._client.chat.completions.create(**base_kwargs)
 
-        deadline = time.monotonic() + self._timeout
         chunks = []
-        for chunk in stream:
-            if time.monotonic() > deadline:
-                stream.close()
-                raise TimeoutError(
-                    f"Translation exceeded {self._timeout}s total timeout"
-                )
+        for chunk in self._stream_with_deadline(stream):
             if hasattr(chunk, "usage") and chunk.usage:
                 self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
                 self._last_completion_tokens = chunk.usage.completion_tokens or 0
