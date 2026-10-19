@@ -107,3 +107,72 @@ def test_menu_uses_the_window_with_a_text_fallback():
     menu = (ROOT / "launcher" / "menu.ps1").read_text(encoding="utf-8-sig")
     assert "Show-LauncherWindow" in menu
     assert re.search(r"catch\s*\{[^}]*Read-Host|Show-TextMenu", menu, re.S), "a text menu must remain as fallback"
+
+
+def _ps_script(tmp_path, body: str) -> subprocess.CompletedProcess:
+    """Run like LiveTranslate.bat does: gui.ps1 dot-sourced into a *script* file scope
+    (-File), not -Command. Button handlers run inside the WinForms message loop, where
+    closures and script-scope functions behave differently than in a console command."""
+    script = tmp_path / "click_test.ps1"
+    script.write_text(
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+        "$ErrorActionPreference = 'Stop'\n"
+        f". '{GUI}'\n" + body, encoding="utf-8-sig")
+    return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-File", str(script)],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+
+
+_CLICK = r"""
+Add-Type -AssemblyName System.Windows.Forms
+function Click-On([string]$button, [string]$select, $answer = $null) {
+    $ui = New-LauncherForm -Catalog (Get-LauncherCatalog -Root '__ROOT__') -CurrentModel 'qwen3.5:9b' -ModelsDir '__MODELS__'
+    $f = $ui.Form
+    if ($null -ne $answer) { $f.Tag.Confirm = { param($text) $script:asked = $text; $answer }.GetNewClosure() }
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $f.Location = New-Object System.Drawing.Point(-5000, -5000)
+    $f.ShowInTaskbar = $false
+    $f.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+    if ($select) {
+        $i = 0
+        foreach ($item in $ui.ModelBox.Items) { if ($item -like "*$select*") { $ui.ModelBox.SelectedIndex = $i }; $i++ }
+    }
+    $f.Controls.Find($button, $true)[0].PerformClick()
+    [System.Windows.Forms.Application]::DoEvents()
+    $out = @{ action = $ui.Result.Action; model = $ui.Result.Model; open = $f.Visible }
+    $f.Dispose()
+    return $out
+}
+$r = [ordered]@{}
+foreach ($b in 'btnStart', 'btnVerify', 'btnGuide', 'btnExit') { $r[$b] = Click-On $b $null }
+$r['switch4b'] = Click-On 'btnSwitch' 'Qwen3.5 4B'
+$r['switchSame'] = Click-On 'btnSwitch' 'Qwen3.5 9B'
+$r['sakuraYes'] = Click-On 'btnSwitch' 'Sakura' $true
+$r['sakuraNo'] = Click-On 'btnSwitch' 'Sakura' $false
+$r | ConvertTo-Json -Compress -Depth 4
+"""
+
+
+@windows_only
+def test_every_button_works_when_clicked_like_the_real_launcher(tmp_path):
+    """Regression: 2026-10-20 clicking 檢查環境 / 使用說明 / 離開 raised
+    "The property 'Action' cannot be found on this object" (closure lost $result)."""
+    models = tmp_path / "models"
+    lib = models / "manifests" / "registry.ollama.ai" / "library" / "qwen3.5"
+    lib.mkdir(parents=True)
+    for tag in ("9b", "4b"):
+        (lib / tag).write_text("{}", encoding="utf-8")
+    body = _CLICK.replace("__ROOT__", str(ROOT)).replace("__MODELS__", str(models))
+    r = _ps_script(tmp_path, body)
+    assert r.returncode == 0, r.stdout + r.stderr
+    res = json.loads(r.stdout.strip().splitlines()[-1])
+    assert res["btnStart"]["action"] == "start" and res["btnStart"]["open"] is False
+    assert res["btnVerify"]["action"] == "verify"
+    assert res["btnGuide"]["action"] == "guide"
+    assert res["btnExit"]["action"] == "exit"
+    assert res["switch4b"] == {"action": "switch", "model": "qwen3.5:4b", "open": False}
+    # already in use: nothing to do, no blocking message box, window stays open
+    assert res["switchSame"]["action"] == "exit" and res["switchSame"]["open"] is True
+    # not downloaded: asks first (size in the question), switches only on "yes"
+    assert res["sakuraYes"] == {"action": "switch", "model": SAKURA, "open": False}
+    assert res["sakuraNo"]["action"] == "exit" and res["sakuraNo"]["open"] is True

@@ -62,8 +62,21 @@ function Resolve-SwitchRequest {
     return "none"
 }
 
+function Show-LauncherError {
+    # 按鈕動作出錯時：寫進黑色視窗並顯示看得懂的訊息（不讓 WinForms 跳出例外對話框）
+    param($ErrorRecord)
+    $msg = "$($ErrorRecord.Exception.Message)"
+    Write-Host "[錯誤] 啟動視窗：$msg" -ForegroundColor Red
+    Write-Host ($ErrorRecord.ScriptStackTrace) -ForegroundColor DarkGray
+    [void][System.Windows.Forms.MessageBox]::Show("發生錯誤：$msg`n`n詳細內容在黑色視窗。", "LiveTranslate",
+        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+}
+
 function New-LauncherForm {
-    # 建立視窗但不顯示；回傳 @{ Form; ModelBox; Result }，Result.Action 由按鈕設定
+    # 建立視窗但不顯示；回傳 @{ Form; ModelBox; Result }，Result.Action 由按鈕設定。
+    # 按鈕的處理程式不使用 GetNewClosure：它只帶走當下這一層的變數，而且會看不到
+    # menu.ps1 載入的函式（2026-10-20 的「The property 'Action' cannot be found」）。
+    # 需要的狀態一律放在 $form.Tag，處理程式用 $this（被按的按鈕）找回所在的視窗。
     param($Catalog, [string]$CurrentModel, [string]$ModelsDir = (Get-OllamaModelsDir))
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -91,12 +104,21 @@ function New-LauncherForm {
     $sub.Location = New-Object System.Drawing.Point(22, 56); $sub.AutoSize = $true
     $form.Controls.Add($sub)
 
+    # Every action button: its Tag is the action name returned to menu.ps1
+    $onAction = {
+        try {
+            $f = $this.FindForm()
+            $f.Tag.Result.Action = [string]$this.Tag
+            $f.Close()
+        } catch { Show-LauncherError $_ }
+    }
+
     $btnStart = New-Object System.Windows.Forms.Button
-    $btnStart.Name = "btnStart"
+    $btnStart.Name = "btnStart"; $btnStart.Tag = "start"
     $btnStart.Text = "▶  啟動字幕"
     $btnStart.Font = New-Object System.Drawing.Font("Microsoft JhengHei UI", 14, [System.Drawing.FontStyle]::Bold)
     $btnStart.Location = New-Object System.Drawing.Point(20, 88); $btnStart.Size = New-Object System.Drawing.Size(520, 60)
-    $btnStart.Add_Click({ $result.Action = "start"; $form.Close() }.GetNewClosure())
+    $btnStart.Add_Click($onAction)
     $form.Controls.Add($btnStart)
 
     $grp = New-Object System.Windows.Forms.GroupBox
@@ -132,31 +154,36 @@ function New-LauncherForm {
     $btnSwitch.Text = "切換"
     $btnSwitch.Location = New-Object System.Drawing.Point(424, 27); $btnSwitch.Size = New-Object System.Drawing.Size(82, 30)
     $btnSwitch.Add_Click({
-        if ($box.SelectedIndex -lt 0) { return }
-        $e = $entries[$box.SelectedIndex]
-        $ask = { param($text) ([System.Windows.Forms.MessageBox]::Show($form, $text, "下載翻譯模型",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq
-            [System.Windows.Forms.DialogResult]::Yes) }
-        $decision = Resolve-SwitchRequest -Entry $e -CurrentModel $CurrentModel -Downloaded $downloaded[$e.model] -Confirm $ask
-        if ($decision -eq "switch") { $result.Action = "switch"; $result.Model = $e.model; $form.Close() }
-        elseif ($e.model -eq $CurrentModel) {
-            [void][System.Windows.Forms.MessageBox]::Show($form, "目前已經在使用「$($e.label)」。", "翻譯模型")
-        }
-    }.GetNewClosure())
+        try {
+            $f = $this.FindForm()
+            $st = $f.Tag
+            if ($st.Box.SelectedIndex -lt 0) { return }
+            $e = $st.Entries[$st.Box.SelectedIndex]
+            $ask = $st.Confirm  # tests replace the download question with a fixed answer
+            if (-not $ask) {
+                $ask = { param($text) ([System.Windows.Forms.MessageBox]::Show($f, $text, "下載翻譯模型",
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq
+                    [System.Windows.Forms.DialogResult]::Yes) }
+            }
+            $decision = Resolve-SwitchRequest -Entry $e -CurrentModel $st.Current -Downloaded $st.Downloaded[$e.model] -Confirm $ask
+            if ($decision -eq "switch") {
+                $st.Result.Action = "switch"; $st.Result.Model = $e.model; $f.Close()
+            } elseif ($e.model -eq $st.Current) {
+                $st.Hint.Text = "目前已經在使用「$($e.label)」。"
+            }
+        } catch { Show-LauncherError $_ }
+    })
     $grp.Controls.Add($btnSwitch)
 
-    $mk = {
-        param($name, $text, $x, $action)
+    $buttons = @{}
+    foreach ($spec in @(@("btnVerify", "檢查環境", 20, "verify"), @("btnGuide", "使用說明", 200, "guide"), @("btnExit", "離開", 380, "exit"))) {
         $b = New-Object System.Windows.Forms.Button
-        $b.Name = $name; $b.Text = $text
-        $b.Location = New-Object System.Drawing.Point($x, 296); $b.Size = New-Object System.Drawing.Size(160, 36)
-        $b.Add_Click({ $result.Action = $action; $form.Close() }.GetNewClosure())
+        $b.Name = $spec[0]; $b.Text = $spec[1]; $b.Tag = $spec[3]
+        $b.Location = New-Object System.Drawing.Point($spec[2], 296); $b.Size = New-Object System.Drawing.Size(160, 36)
+        $b.Add_Click($onAction)
         $form.Controls.Add($b)
-        return $b
+        $buttons[$spec[0]] = $b
     }
-    [void](& $mk "btnVerify" "檢查環境" 20 "verify")
-    [void](& $mk "btnGuide" "使用說明" 200 "guide")
-    $btnExit = & $mk "btnExit" "離開" 380 "exit"
 
     $foot = New-Object System.Windows.Forms.Label
     $foot.Text = "每次啟動會自動檢查更新；關閉字幕程式就會釋放顯示卡。"
@@ -164,9 +191,10 @@ function New-LauncherForm {
     $foot.Location = New-Object System.Drawing.Point(22, 344); $foot.AutoSize = $true
     $form.Controls.Add($foot)
 
-    $form.AcceptButton = $btnStart   # Enter = 啟動
-    $form.CancelButton = $btnExit    # Esc = 離開
-    $form.Add_Shown({ $btnStart.Focus() }.GetNewClosure())
+    $form.Tag = @{ Result = $result; Box = $box; Entries = $entries; Downloaded = $downloaded; Current = $CurrentModel; Hint = $hint; Confirm = $null }
+    $form.AcceptButton = $btnStart            # Enter = 啟動
+    $form.CancelButton = $buttons["btnExit"]  # Esc = 離開
+    $form.Add_Shown({ $this.AcceptButton.Focus() })
     return @{ Form = $form; ModelBox = $box; Result = $result }
 }
 
