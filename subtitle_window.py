@@ -55,6 +55,9 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
     "enabled": False,
     "sentences": 1,
     "window_width": 1000,
+    # Box height set by dragging the top / bottom edge; 0 = fit to the text.
+    # The box never clips text: if the text needs more room the window grows.
+    "window_height": 0,
     "line_spacing": 8,
     "bg_color": "#000000",
     "bg_opacity": 76,
@@ -525,6 +528,10 @@ class _EditFrame(QWidget):
         w, h = self.width(), self.height()
         for i in (4, 9, 14):
             p.drawLine(w - 2 - i, h - 2, w - 2, h - 2 - i)
+        # Short bars on the top and bottom edges: they can be dragged to change the height
+        cx = w // 2
+        for y in (3, h - 4):
+            p.drawLine(cx - 12, y, cx + 12, y)
         p.end()
 
 
@@ -565,9 +572,11 @@ class SubtitleWindow(QWidget):
     live_signal = pyqtSignal(str, str, int, int)
 
     _EDGE = 12       # px zone on the right edge used for width resizing
-    _CORNER = 18     # px zone at the bottom-right corner
+    _VEDGE = 8       # px zones on the top / bottom edges used for height resizing
+    _CORNER = 18     # px zone at the bottom-right corner (width + height)
     _MIN_WIDTH = 200
     _MAX_WIDTH = 3840
+    _MAX_HEIGHT = 2160
 
     def __init__(self, settings=None):
         super().__init__()
@@ -575,7 +584,7 @@ class SubtitleWindow(QWidget):
         self._text_widgets = []
         self._sentences = []  # [(original, {lang: text, ...}), ...]
         self._drag_pos = None
-        self._resize_start = None  # (mouse x, width) while dragging the right edge
+        self._resize_start = None  # (zone, mouse global pos, window geometry) while resizing
         self._hover = False
         self._bg_pixmap = None
         self._click_through = bool(self._settings.get("click_through", False))
@@ -660,6 +669,8 @@ class SubtitleWindow(QWidget):
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(16, 8, 16, 8)
         self._content_layout.setSpacing(s.get("line_spacing", 8))
+        # Text stays vertically centred when the user made the box taller than the text
+        self._content_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self._rebuild_text_widgets()
 
@@ -705,6 +716,14 @@ class SubtitleWindow(QWidget):
                 self._content.setStyleSheet(f"background: {rgba}; border-radius: {radius}px;")
         self.update()
 
+    def box_height(self) -> int:
+        """User-set box height (dragged top / bottom edge); 0 = fit to the text.
+        The value comes from user_settings.json, so anything that is not a number is 0."""
+        v = self._settings.get("window_height", 0)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return 0
+        return int(min(self._MAX_HEIGHT, max(0, v)))
+
     def _calc_target_height(self):
         margins = self._content_layout.contentsMargins()
         spacing = self._content_layout.spacing()
@@ -713,7 +732,7 @@ class SubtitleWindow(QWidget):
             total += tw.desired_height()
             if i > 0:
                 total += spacing
-        return max(total, 20)
+        return max(total, 20, self.box_height())
 
     def _fit_height_snap(self):
         new_h = self._calc_target_height()
@@ -767,6 +786,7 @@ class SubtitleWindow(QWidget):
 
         self._apply_background()
         self._refresh_display()
+        self._fit_height_snap()  # the box height may have changed even if the text did not
         self.set_click_through(self._settings.get("click_through", False))
         self.set_locked(self._settings.get("locked", False))
 
@@ -970,12 +990,17 @@ class SubtitleWindow(QWidget):
     _DRAG_BUTTONS = Qt.MouseButton.LeftButton | Qt.MouseButton.MiddleButton
 
     def _edge_zone(self, pos):
-        """Return "corner", "right" or None for a local position."""
+        """Return "corner", "right", "top", "bottom" or None for a local position."""
         x, y = pos.x(), pos.y()
-        if x >= self.width() - self._CORNER and y >= self.height() - self._CORNER:
+        w, h = self.width(), self.height()
+        if x >= w - self._CORNER and y >= h - self._CORNER:
             return "corner"
-        if x >= self.width() - self._EDGE:
+        if x >= w - self._EDGE:
             return "right"
+        if y < self._VEDGE:
+            return "top"
+        if y >= h - self._VEDGE:
+            return "bottom"
         return None
 
     def _update_cursor(self, pos):
@@ -987,6 +1012,8 @@ class SubtitleWindow(QWidget):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         elif zone == "right":
             self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif zone in ("top", "bottom"):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
         else:
             self.setCursor(Qt.CursorShape.SizeAllCursor)
 
@@ -1017,8 +1044,9 @@ class SubtitleWindow(QWidget):
     def mousePressEvent(self, event):
         if event.button() & self._DRAG_BUTTONS and not self._click_through and not self._locked:
             local = event.position().toPoint()
-            if event.button() == Qt.MouseButton.LeftButton and self._edge_zone(local):
-                self._resize_start = (event.globalPosition().toPoint().x(), self.width())
+            zone = self._edge_zone(local) if event.button() == Qt.MouseButton.LeftButton else None
+            if zone:
+                self._resize_start = (zone, event.globalPosition().toPoint(), QRect(self.geometry()))
                 self._drag_pos = None
             else:
                 self._resize_start = None
@@ -1032,11 +1060,17 @@ class SubtitleWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._resize_start is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            start_x, start_w = self._resize_start
-            new_w = start_w + (event.globalPosition().toPoint().x() - start_x)
-            new_w = max(self._MIN_WIDTH, min(self._MAX_WIDTH, new_w))
-            if new_w != self.width():
-                self.setFixedWidth(new_w)   # text widgets re-wrap in their resizeEvent
+            zone, start, geo = self._resize_start
+            delta = event.globalPosition().toPoint() - start
+            if zone in ("right", "corner"):
+                new_w = max(self._MIN_WIDTH, min(self._MAX_WIDTH, geo.width() + delta.x()))
+                if new_w != self.width():
+                    self.setFixedWidth(new_w)   # text widgets re-wrap in their resizeEvent
+            if zone in ("top", "bottom", "corner"):
+                grow = -delta.y() if zone == "top" else delta.y()
+                self._settings["window_height"] = int(min(self._MAX_HEIGHT, max(0, geo.height() + grow)))
+                self._apply_box_height(keep_bottom=(zone == "top"), geo=geo)
+            else:
                 self._fit_height_snap()
             event.accept()
             return
@@ -1046,6 +1080,16 @@ class SubtitleWindow(QWidget):
             return
         self._update_cursor(event.position().toPoint())
         super().mouseMoveEvent(event)
+
+    def _apply_box_height(self, keep_bottom: bool, geo):
+        """Resize to the dragged box height (never below what the text needs). Dragging
+        the top edge keeps the bottom edge where it was, and vice versa."""
+        if self._height_anim and self._height_anim.state() != QPropertyAnimation.State.Stopped:
+            self._height_anim.stop()
+        new_h = self._calc_target_height()
+        y = geo.y() + geo.height() - new_h if keep_bottom else geo.y()
+        self.setFixedHeight(new_h)
+        self.move(self.x(), y)
 
     def mouseReleaseEvent(self, event):
         if event.button() & self._DRAG_BUTTONS and (self._drag_pos or self._resize_start is not None):

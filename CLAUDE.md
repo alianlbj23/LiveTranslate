@@ -86,6 +86,7 @@ Standalone transparent window for OBS capture, separate from the main overlay:
 - Each line has independent font, color, outline, alignment, animation settings
 - Long text auto-wraps at punctuation/word boundaries, expanding widget height for multiple lines
 - `desired_height()` returns height based on wrapped line count (never 0), preventing window collapse when empty
+- Top / bottom edges (and the bottom-right corner) can be dragged to set a box height (`subtitle_mode.window_height`, 0 = fit to text, saved by main's `_save_subwin_state`). The box never clips text; text stays vertically centred in a taller box
 - Window height animates smoothly (150ms OutCubic) when wrap count changes, keeping vertical center stable
 - Animation order: exit animation → height change → entry animation
 - Settings UI in `subtitle_settings.py`: grid layout, text lines as list with double-click edit dialog

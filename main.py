@@ -2258,6 +2258,7 @@ def main():
         sm["window_x"] = pos.x()
         sm["window_y"] = pos.y()
         sm["window_width"] = subwin.width()
+        sm["window_height"] = subwin.box_height()
         sm["locked"] = subwin.is_locked()
         settings["subtitle_mode"] = sm
         panel._current_settings["subtitle_mode"] = sm

@@ -1099,7 +1099,7 @@ class ControlPanel(FluentWindow):
     # Changed at runtime by menus / dragging, never by the subtitle settings page. The
     # page keeps an older copy of them, so its edits must not send those values back
     # (e.g. "固定位置" from the right-click menu was undone by any edit on the page).
-    _SUBWIN_RUNTIME_KEYS = ("enabled", "locked", "window_x", "window_y",
+    _SUBWIN_RUNTIME_KEYS = ("enabled", "locked", "window_x", "window_y", "window_height",
                             "show_original", "show_translation", "show_previous")
 
     def _on_subtitle_settings_changed(self, s):
