@@ -1,10 +1,19 @@
-﻿# LiveTranslate 維護選單
+﻿# LiveTranslate 單一入口選單
+# 雙擊 LiveTranslate.bat 會開這個選單；$AutoStartSeconds 秒內沒按鍵就自動啟動雙字幕。
+# 也可直接指定動作（捷徑用）：powershell -File menu.ps1 -Action start | verify
+param(
+    [ValidateSet("menu", "start", "verify")]
+    [string]$Action = "menu",
+    [int]$AutoStartSeconds = 3
+)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Root     = "D:\workspace\language_translate"
 $Python   = Join-Path $Root ".venv\Scripts\python.exe"
 $Ollama   = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 $Settings = Join-Path $Root "user_settings.json"
 $Helper   = Join-Path $Root "launcher\set_api_base.py"
+$StartScript  = Join-Path $Root "launcher\start_jp_subtitles.ps1"
+$VerifyScript = Join-Path $Root "launcher\verify.ps1"
 
 function Get-ActivePort {
     if (Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue) { return 11435 }
@@ -30,17 +39,60 @@ function Switch-Model {
         & $Python -I $Helper $Settings "http://127.0.0.1:$port/v1" $Model
     }
     # 讓啟動腳本之後也用這個模型
-    $launcher = Join-Path $Root "launcher\start_jp_subtitles.ps1"
-    $txt = [IO.File]::ReadAllText($launcher, [Text.Encoding]::UTF8)
+    $txt = [IO.File]::ReadAllText($StartScript, [Text.Encoding]::UTF8)
     $txt = $txt -replace '\$Model\s*=\s*"qwen3\.5:\d+b"', ('$Model    = "' + $Model + '"')
-    [IO.File]::WriteAllText($launcher, $txt, (New-Object Text.UTF8Encoding $true))
+    [IO.File]::WriteAllText($StartScript, $txt, (New-Object Text.UTF8Encoding $true))
     Write-Host "已切換為 $Model（LiveTranslate 重新啟動後生效）。" -ForegroundColor Green
 }
 
+function Stop-Ollama {
+    Get-Process -Name "ollama", "ollama app" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $Root "launcher\ollama.pid") -Force -ErrorAction SilentlyContinue
+    Write-Host "已停止 Windows 版 Ollama，顯示記憶體已釋放。" -ForegroundColor Green
+}
+
+function Wait-ForKey {
+    # 等 $Seconds 秒；有按鍵就回傳該字元，逾時回傳 $null。主控台不支援時改用 Read-Host。
+    param([int]$Seconds)
+    try {
+        $end = (Get-Date).AddSeconds($Seconds)
+        while ((Get-Date) -lt $end) {
+            if ($host.UI.RawUI.KeyAvailable) {
+                $k = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                return [string]$k.Character
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        return $null
+    } catch {
+        return (Read-Host "請輸入數字（直接 Enter = 啟動雙字幕）")
+    }
+}
+
+function Invoke-Choice {
+    param([string]$Choice)
+    switch ($Choice.Trim()) {
+        "1" { & $StartScript }
+        "2" { & $VerifyScript }
+        "3" { Switch-Model "qwen3.5:4b" }
+        "4" { Switch-Model "qwen3.5:9b" }
+        "5" { Push-Location $Root; cmd /c update.bat; Pop-Location }
+        "6" { Stop-Ollama }
+        "7" { Start-Process (Join-Path $Root "INSTALL_GUIDE.md") }
+        "0" { exit 0 }
+        ""  { & $StartScript }
+        default { Write-Host "無效的選項：$Choice" -ForegroundColor Yellow }
+    }
+}
+
+if ($Action -eq "start")  { & $StartScript;  exit $LASTEXITCODE }
+if ($Action -eq "verify") { & $VerifyScript; exit $LASTEXITCODE }
+
+$first = $true
 while ($true) {
     Write-Host ""
-    Write-Host "============ LiveTranslate 維護選單 ============" -ForegroundColor Magenta
-    Write-Host " 1) 啟動日文雙字幕"
+    Write-Host "============ LiveTranslate ============" -ForegroundColor Magenta
+    Write-Host " 1) 啟動日文雙字幕                （預設）"
     Write-Host " 2) 檢查 GPU / Ollama / 翻譯是否正常"
     Write-Host " 3) 切換翻譯模型為 qwen3.5:4b（顯示記憶體不足時用）"
     Write-Host " 4) 切換翻譯模型為 qwen3.5:9b（預設，品質較好）"
@@ -48,19 +100,13 @@ while ($true) {
     Write-Host " 6) 停止 Ollama（釋放顯示記憶體，玩遊戲前一定要按）"
     Write-Host " 7) 開啟安裝說明 INSTALL_GUIDE.md"
     Write-Host " 0) 離開"
-    $choice = Read-Host "請輸入數字"
-    switch ($choice) {
-        "1" { & (Join-Path $Root "launcher\start_jp_subtitles.ps1") }
-        "2" { & (Join-Path $Root "launcher\verify.ps1") }
-        "3" { Switch-Model "qwen3.5:4b" }
-        "4" { Switch-Model "qwen3.5:9b" }
-        "5" { Push-Location $Root; cmd /c update.bat; Pop-Location }
-        "6" {
-            Get-Process -Name "ollama", "ollama app" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Write-Host "已停止 Windows 版 Ollama。" -ForegroundColor Green
-        }
-        "7" { Start-Process (Join-Path $Root "INSTALL_GUIDE.md") }
-        "0" { exit 0 }
-        default { Write-Host "無效的選項" -ForegroundColor Yellow }
+    if ($first -and $AutoStartSeconds -gt 0) {
+        Write-Host " $AutoStartSeconds 秒內沒按鍵就自動啟動雙字幕；要用其他功能請按數字。" -ForegroundColor DarkGray
+        $choice = Wait-ForKey $AutoStartSeconds
+        if ($null -eq $choice) { $choice = "1" }
+        $first = $false
+    } else {
+        $choice = Read-Host "請輸入數字"
     }
+    Invoke-Choice $choice
 }

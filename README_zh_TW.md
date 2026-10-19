@@ -12,7 +12,7 @@ Windows 即時音訊翻譯工具。捕獲系統音訊（WASAPI loopback）和可
 
 > ### 關於這個 fork（alianlbj23/LiveTranslate）
 > 在原專案基礎上加入：**繁體中文（台灣）介面**（`i18n/zh_TW.yaml`）、Whisper `beam_size` 可在 `config.yaml` 設定（預設 greedy）、
-> 專為「YouTube 日文直播 → 日文 + 台灣繁體中文雙字幕、本機 Ollama 翻譯」設計的一鍵啟動腳本（`日文雙字幕.bat`、`維護選單.bat`、`檢查環境.bat`）與快速模式。
+> 專為「YouTube 日文直播 → 日文 + 台灣繁體中文雙字幕、本機 Ollama 翻譯」設計的單一入口腳本（`LiveTranslate.bat`：啟動／檢查環境／切換模型／更新／停止 Ollama）與快速模式。
 > 完整的安裝、設定、疑難排解請看 [INSTALL_GUIDE.md](INSTALL_GUIDE.md)。
 
 ## 截圖

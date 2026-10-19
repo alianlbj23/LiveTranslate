@@ -165,10 +165,10 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 
 | 檔案 | 用途 |
 |---|---|
-| `D:\workspace\language_translate\日文雙字幕.bat` | **日常用這個**，點兩下即可 |
+| `D:\workspace\language_translate\LiveTranslate.bat` | **唯一入口**：點兩下，3 秒內不按鍵就自動啟動雙字幕；按數字可進其他功能 |
 | `D:\workspace\language_translate\launcher\start_jp_subtitles.ps1` | 啟動邏輯：檢查/啟動 Ollama → 確認模型 → 校正 API 埠 → 啟動 LiveTranslate |
-| `D:\workspace\language_translate\維護選單.bat` | 互動選單：切換 4b/9b 模型、更新、停止 Ollama、開本文件 |
-| `D:\workspace\language_translate\檢查環境.bat` | 一鍵驗證 GPU / Whisper CUDA / Ollama / 翻譯 |
+| `launcher\menu.ps1` | 選單邏輯：1 啟動、2 檢查環境、3/4 切換模型、5 更新、6 停止 Ollama、7 開本文件；也可 `-Action start|verify` 直接執行 |
+| `launchererify.ps1` | 驗證 GPU / Whisper CUDA / Ollama / 翻譯（選單的 2） |
 | `launcher\set_api_base.py`、`write_settings.py`、`download_whisper_turbo.py` | 上面腳本用的小工具 |
 
 ---
@@ -304,14 +304,14 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 ## 4. 日常使用方式
 
 1. 開啟 Chrome 的 YouTube 直播。
-2. 點兩下 `D:\workspace\language_translate` 裡的 **`日文雙字幕.bat`**（可自行建立桌面捷徑）。黑色視窗會依序顯示 Ollama 檢查、模型檢查，然後出現字幕浮動視窗；語音模型載入約 5–10 秒。
+2. 點兩下 `D:\workspace\language_translate` 裡的 **`LiveTranslate.bat`**，3 秒內不按鍵就自動啟動（可自行建立桌面捷徑）。黑色視窗會依序顯示 Ollama 檢查、模型檢查，然後出現字幕浮動視窗；語音模型載入約 5–10 秒。
 3. 把字幕視窗拖到想要的位置，勾 **Top-most** 與 **Click-through**。
 4. 直播有人講話後約 1–3 秒會出現日文原文與中文翻譯。
 5. **關閉**：字幕視窗右上角 **結束**，或右下角系統匣的 LiveTranslate 圖示 → 結束。關閉黑色視窗也會一起結束。
-   結束時程式會自動卸載翻譯模型並關閉啟動腳本開的 Ollama，顯示記憶體會全部釋放（黑色視窗會顯示「已卸載」「Ollama 服務已關閉」）。若是直接關掉黑色視窗，模型最多 30 分鐘後自動卸載；想立刻釋放用 `維護選單.bat` → 6。
+   結束時程式會自動卸載翻譯模型並關閉啟動腳本開的 Ollama，顯示記憶體會全部釋放（黑色視窗會顯示「已卸載」「Ollama 服務已關閉」）。若是直接關掉黑色視窗，模型最多 30 分鐘後自動卸載；想立刻釋放用 `LiveTranslate.bat` → 6。
 6. **切換語音辨識模型**：Settings → VAD / ASR → 引擎 改成 Anime-Whisper（或 Whisper 模型下拉改 large-v3 / medium）。切換會自動重載，不用重啟。
-7. **切換翻譯模型**：`D:\workspace\language_translate\維護選單.bat` → 3（qwen3.5:4b，顯示記憶體不足時）或 4（qwen3.5:9b）。
-8. **更新 LiveTranslate**：`維護選單.bat` → 5（執行上游的 `update.bat`，不會動到 PyTorch）。
+7. **切換翻譯模型**：`LiveTranslate.bat` → 3（qwen3.5:4b，顯示記憶體不足時）或 4（qwen3.5:9b）。
+8. **更新 LiveTranslate**：`LiveTranslate.bat` → 5（執行上游的 `update.bat`，不會動到 PyTorch）。
 9. 每次執行會在 `D:\workspace\language_translate\transcripts\` 留下原文 / 翻譯逐字稿（可在 Settings → 逐字稿儲存 關閉）。
 10. **兩種字幕視窗的操作方式**
     - 主浮動視窗（有「LiveTranslate」標題列的那個）：拖標題列移動，右下角有縮放把手；勾「滑鼠穿透」後只有標題列能點。
@@ -321,7 +321,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 
 ## 5. 驗證方式
 
-最簡單：點兩下 `D:\workspace\language_translate\檢查環境.bat`，應看到：
+最簡單：`LiveTranslate.bat` → 2，應看到：
 
 1. `nvidia-smi` 列出 RTX 5070。
 2. `torch 2.11.0+cu128 | cuda available: True | NVIDIA GeForce RTX 5070`
@@ -348,8 +348,8 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 
 ### 常見問題
 
-- **顯示記憶體不足 / 翻譯變很慢**：實測在桌面開了很多程式（Chrome、Discord、Steam、Wallpaper Engine 等已吃 3.7 GB）時，Whisper turbo + qwen3.5:9b 會用到 11.6 / 12.2 GB，非常接近上限。先關掉 Wallpaper Engine、多餘的 Chrome 分頁；仍不夠就用 `維護選單.bat` → 3 換成 `qwen3.5:4b`（約 3 GB VRAM）。
-- **玩遊戲時不能同時使用**：遊戲本身會吃掉大部分 VRAM，Ollama 會被迫改用 CPU/RAM，翻譯延遲變成 10 秒以上甚至失敗。玩遊戲前先結束 LiveTranslate（用「結束」按鈕或系統匣 → 結束，顯示記憶體會自動釋放）；若只是關掉黑色視窗，再用 `維護選單.bat` → 6 立刻釋放。
+- **顯示記憶體不足 / 翻譯變很慢**：實測在桌面開了很多程式（Chrome、Discord、Steam、Wallpaper Engine 等已吃 3.7 GB）時，Whisper turbo + qwen3.5:9b 會用到 11.6 / 12.2 GB，非常接近上限。先關掉 Wallpaper Engine、多餘的 Chrome 分頁；仍不夠就用 `LiveTranslate.bat` → 3 換成 `qwen3.5:4b`（約 3 GB VRAM）。
+- **玩遊戲時不能同時使用**：遊戲本身會吃掉大部分 VRAM，Ollama 會被迫改用 CPU/RAM，翻譯延遲變成 10 秒以上甚至失敗。玩遊戲前先結束 LiveTranslate（用「結束」按鈕或系統匣 → 結束，顯示記憶體會自動釋放）；若只是關掉黑色視窗，再用 `LiveTranslate.bat` → 6 立刻釋放。
 - **背景音樂太大聲、辨識出奇怪的句子**（實測在沒人講話時辨識出「ご視聴ありがとうございました」）：這是 Whisper 對音樂/靜音的幻覺。調高 Settings → VAD / ASR → Silero VAD 閾值 到 0.5–0.6；或把引擎換成 Anime-Whisper（對日文配音較穩）；YouTube 端調低背景音樂無法做到，只能靠 VAD。
 - **字幕出現簡體中文**：系統提示詞已強制台灣繁體；若仍出現，確認 翻譯 分頁的「預設」是 **自訂** 而不是「日常聊天」等預設（那些預設是英文提示詞，只說 Chinese）。也可在提示詞再加一句「輸出前檢查沒有任何簡體字」。
 - **只想擷取 Chrome 的聲音**：LiveTranslate 只能擷取「某個輸出裝置」的全部聲音，沒有按程式擷取。替代做法：Windows 設定 → 系統 → 音效 → 音量混音器 → 把 Chrome 的「輸出裝置」改成另一個裝置（例如螢幕 HDMI 喇叭或虛擬音效裝置），然後在 LiveTranslate 的「音频」選那個裝置；其他程式維持原本輸出就不會被收進去。最簡單的方式則是看直播時把 Spotify / Discord 等靜音。
@@ -362,7 +362,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 
 ## 7. 解除安裝
 
-1. 關閉 LiveTranslate 與 Ollama（`維護選單.bat` → 6，或工作管理員結束 `ollama.exe`、`ollama app.exe`）。
+1. 關閉 LiveTranslate 與 Ollama（`LiveTranslate.bat` → 6，或工作管理員結束 `ollama.exe`、`ollama app.exe`）。
 2. 刪除整個資料夾 `D:\workspace\language_translate`（含 venv、Whisper 模型、逐字稿，約 7 GB）。
 3. （啟動用的 .bat 都在專案資料夾內，會一起刪除）。
 4. 移除 Ollama：
