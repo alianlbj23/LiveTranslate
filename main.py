@@ -2279,6 +2279,26 @@ def main():
     overlay.subtitle_lock_toggled.connect(on_toggle_subwin_lock)
     overlay.subtitle_click_through_toggled.connect(subwin_ct_action.setChecked)
     overlay.subtitle_settings_requested.connect(_open_subtitle_settings)
+
+    # Which lines the subtitle window shows (original / translation): right-click menu or the 字幕 dropdown.
+    # The window enforces "at least one visible"; menus are synced from what it actually applied.
+    def on_set_subwin_line_visibility(show_original, show_translation):
+        show_o, show_t = subwin.set_line_visibility(show_original, show_translation)
+        w = panel._subtitle_widget
+        w._settings["show_original"] = show_o
+        w._settings["show_translation"] = show_t
+        settings = panel.get_settings()
+        sm = settings.get("subtitle_mode") or {}
+        sm["show_original"] = show_o
+        sm["show_translation"] = show_t
+        settings["subtitle_mode"] = sm
+        panel._current_settings["subtitle_mode"] = sm
+        _save_settings(settings)
+        overlay.set_subtitle_line_visibility(show_o, show_t)
+
+    subwin.line_visibility_requested.connect(on_set_subwin_line_visibility)
+    overlay.subtitle_line_visibility_toggled.connect(on_set_subwin_line_visibility)
+    overlay.set_subtitle_line_visibility(*subwin.line_visibility())
     overlay.set_subtitle_lock_state(subwin.is_locked(), subwin_ct_action.isChecked())
 
     # Connect overlay subtitle button
@@ -2294,6 +2314,7 @@ def main():
         subwin_ct_action.setChecked(bool(s.get("click_through", False)))
         subwin_ct_action.blockSignals(False)
         overlay.set_subtitle_lock_state(bool(s.get("locked", False)), bool(s.get("click_through", False)))
+        overlay.set_subtitle_line_visibility(*subwin.line_visibility())
 
     panel.subtitle_settings_changed.connect(_on_panel_subtitle_changed)
 

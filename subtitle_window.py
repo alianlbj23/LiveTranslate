@@ -69,6 +69,9 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
     "click_through": False,
     # Lock position/size without click-through: clicks still hit the window, but it cannot be dragged or resized
     "locked": False,
+    # Which line types are displayed; at least one stays on
+    "show_original": True,
+    "show_translation": True,
     "lines": [
         {
             "type": "original",
@@ -537,6 +540,7 @@ class SubtitleWindow(QWidget):
     click_through_requested = pyqtSignal(bool)
     # Right-click menu: lock position toggle and open settings (main syncs state)
     lock_requested = pyqtSignal(bool)
+    line_visibility_requested = pyqtSignal(bool, bool)  # (show original, show translation)
     settings_requested = pyqtSignal()
     # Live preview of the sentence being spoken: (original, provisional translation, flags)
     live_signal = pyqtSignal(str, str, int, int)
@@ -657,9 +661,7 @@ class SubtitleWindow(QWidget):
             w.deleteLater()
         self._text_widgets = []
 
-        for line_cfg in self._settings.get("lines", []):
-            if not line_cfg.get("enabled", True):
-                continue
+        for line_cfg in self._visible_line_configs():
             tw = _SubtitleTextWidget()
             tw.set_config(line_cfg)
             tw.height_changed.connect(self._fit_height_animated)
@@ -736,19 +738,7 @@ class SubtitleWindow(QWidget):
     def apply_settings(self, settings: dict):
         self._settings = _merge_settings(DEFAULT_SUBTITLE_WIN_SETTINGS, settings)
 
-        for w in self._text_widgets:
-            self._content_layout.removeWidget(w)
-            w.deleteLater()
-        self._text_widgets = []
-
-        for line_cfg in self._settings.get("lines", []):
-            if not line_cfg.get("enabled", True):
-                continue
-            tw = _SubtitleTextWidget()
-            tw.set_config(line_cfg)
-            tw.height_changed.connect(self._fit_height_animated)
-            self._text_widgets.append(tw)
-            self._content_layout.addWidget(tw)
+        self._rebuild_text_widgets()
 
         self._content_layout.setSpacing(self._settings.get("line_spacing", 8))
         self._min_display_ms = int(self._settings.get("min_display_ms", 1500))
@@ -847,6 +837,40 @@ class SubtitleWindow(QWidget):
     def is_locked(self) -> bool:
         return self._locked
 
+    # --- Which lines are shown (source / translation) ---
+    def _visible_line_configs(self) -> list:
+        show_o, show_t = self.line_visibility()
+        out = []
+        for ln in self._settings.get("lines", []):
+            if not ln.get("enabled", True):
+                continue
+            if show_o if ln.get("type", "original") == "original" else show_t:
+                out.append(ln)
+        return out
+
+    def line_visibility(self) -> tuple:
+        return (bool(self._settings.get("show_original", True)), bool(self._settings.get("show_translation", True)))
+
+    def set_line_visibility(self, show_original, show_translation) -> tuple:
+        """Choose which lines are displayed. At least one must stay visible: an all-hidden
+        request is refused and the current state is returned."""
+        show_o, show_t = bool(show_original), bool(show_translation)
+        if not (show_o or show_t):
+            return self.line_visibility()
+        if (show_o, show_t) == self.line_visibility():
+            return (show_o, show_t)
+        self._settings["show_original"] = show_o
+        self._settings["show_translation"] = show_t
+        self._rebuild_text_widgets()
+        self._refresh_display()
+        if self._is_hidden_by_timeout:
+            # Rebuilt widgets start fully opaque; keep the auto-hidden end state until the next sentence
+            for tw in self._text_widgets:
+                tw._content_opacity_val = 0.0
+                tw.update()
+        self._fit_height_snap()
+        return (show_o, show_t)
+
     def _build_context_menu(self) -> QMenu:
         menu = QMenu(self)
         lock = menu.addAction(t("subwin_menu_lock"))
@@ -857,6 +881,20 @@ class SubtitleWindow(QWidget):
         ct.setCheckable(True)
         ct.setChecked(self._click_through)
         ct.triggered.connect(lambda checked: self.click_through_requested.emit(bool(checked)))
+        menu.addSeparator()
+        show_o, show_t = self.line_visibility()
+        orig = menu.addAction(t("subwin_menu_show_original"))
+        orig.setCheckable(True)
+        orig.setChecked(show_o)
+        orig.triggered.connect(
+            lambda checked: self.line_visibility_requested.emit(bool(checked), self.line_visibility()[1])
+        )
+        trans = menu.addAction(t("subwin_menu_show_translation"))
+        trans.setCheckable(True)
+        trans.setChecked(show_t)
+        trans.triggered.connect(
+            lambda checked: self.line_visibility_requested.emit(self.line_visibility()[0], bool(checked))
+        )
         menu.addSeparator()
         settings = menu.addAction(t("subwin_menu_settings"))
         settings.triggered.connect(self.settings_requested.emit)
@@ -1187,7 +1225,7 @@ class SubtitleWindow(QWidget):
             self._fit_height_snap()
             return
 
-        lines_cfg = [ln for ln in self._settings.get("lines", []) if ln.get("enabled", True)]
+        lines_cfg = self._visible_line_configs()
         wi = 0
 
         for cfg in lines_cfg:

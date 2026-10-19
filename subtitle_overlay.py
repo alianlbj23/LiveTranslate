@@ -599,6 +599,7 @@ class DragHandle(QWidget):
     subtitle_clicked = pyqtSignal()
     subtitle_lock_toggled = pyqtSignal(bool)
     subtitle_click_through_toggled = pyqtSignal(bool)
+    subtitle_line_visibility_toggled = pyqtSignal(bool, bool)  # (show original, show translation)
     subtitle_settings_requested = pyqtSignal()
     click_through_toggled = pyqtSignal(bool)
     topmost_toggled = pyqtSignal(bool)
@@ -676,6 +677,15 @@ class DragHandle(QWidget):
         self._subtitle_ct_action.triggered.connect(
             lambda checked: self.subtitle_click_through_toggled.emit(bool(checked))
         )
+        self._subtitle_menu.addSeparator()
+        self._subtitle_show_orig_action = self._subtitle_menu.addAction(t("subwin_menu_show_original"))
+        self._subtitle_show_orig_action.setCheckable(True)
+        self._subtitle_show_orig_action.setChecked(True)
+        self._subtitle_show_orig_action.triggered.connect(lambda _c: self._emit_line_visibility())
+        self._subtitle_show_trans_action = self._subtitle_menu.addAction(t("subwin_menu_show_translation"))
+        self._subtitle_show_trans_action.setCheckable(True)
+        self._subtitle_show_trans_action.setChecked(True)
+        self._subtitle_show_trans_action.triggered.connect(lambda _c: self._emit_line_visibility())
         self._subtitle_menu.addSeparator()
         self._subtitle_settings_action = self._subtitle_menu.addAction(t("subwin_menu_settings"))
         self._subtitle_settings_action.triggered.connect(self.subtitle_settings_requested.emit)
@@ -904,6 +914,16 @@ class DragHandle(QWidget):
         self._subtitle_lock_action.setChecked(bool(locked))
         self._subtitle_ct_action.setChecked(bool(click_through))
 
+    def _emit_line_visibility(self):
+        self.subtitle_line_visibility_toggled.emit(
+            self._subtitle_show_orig_action.isChecked(), self._subtitle_show_trans_action.isChecked()
+        )
+
+    def set_subtitle_line_visibility(self, show_original: bool, show_translation: bool):
+        """Sync the show-original / show-translation check marks from the window state (no signals)."""
+        self._subtitle_show_orig_action.setChecked(bool(show_original))
+        self._subtitle_show_trans_action.setChecked(bool(show_translation))
+
     def set_subtitle_checked(self, checked: bool):
         self._subtitle_btn.setStyleSheet(
             _BTN_CSS.replace("rgba(255,255,255,20)", "rgba(80,180,80,40)").replace(
@@ -935,6 +955,7 @@ class SubtitleOverlay(QWidget):
     subtitle_toggled = pyqtSignal()
     subtitle_lock_toggled = pyqtSignal(bool)
     subtitle_click_through_toggled = pyqtSignal(bool)
+    subtitle_line_visibility_toggled = pyqtSignal(bool, bool)  # (show original, show translation)
     subtitle_settings_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
@@ -1000,6 +1021,7 @@ class SubtitleOverlay(QWidget):
         self._handle.subtitle_clicked.connect(self.subtitle_toggled.emit)
         self._handle.subtitle_lock_toggled.connect(self.subtitle_lock_toggled.emit)
         self._handle.subtitle_click_through_toggled.connect(self.subtitle_click_through_toggled.emit)
+        self._handle.subtitle_line_visibility_toggled.connect(self.subtitle_line_visibility_toggled.emit)
         self._handle.subtitle_settings_requested.connect(self.subtitle_settings_requested.emit)
         self._handle.click_through_toggled.connect(self._set_click_through)
         self._handle.topmost_toggled.connect(self._set_topmost)
@@ -1171,6 +1193,9 @@ class SubtitleOverlay(QWidget):
 
     def set_subtitle_lock_state(self, locked: bool, click_through: bool):
         self._handle.set_subtitle_lock_state(locked, click_through)
+
+    def set_subtitle_line_visibility(self, show_original: bool, show_translation: bool):
+        self._handle.set_subtitle_line_visibility(show_original, show_translation)
 
     @pyqtSlot(float, float, object)
     def _on_update_monitor(self, rms: float, vad_conf: float, mic_rms):
