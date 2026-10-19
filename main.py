@@ -1185,6 +1185,7 @@ class LiveTranslateApp:
             return
         n = len(self._subwin.get_target_languages()) if self._subwin else 1
         self._tl_executor = ThreadPoolExecutor(max_workers=max(8, n + 1))
+        self._live_executor = ThreadPoolExecutor(max_workers=1)
         self._asr_queue = queue.Queue(maxsize=16)
         self._running = True
         self._paused = False
@@ -1238,6 +1239,7 @@ class LiveTranslateApp:
         self._interim_committed_tail = ""
         self._tl_executor.shutdown(wait=True)
         self._clear_live_preview()
+        self._live_executor.shutdown(wait=True)
         self._transcript.close()
         if self._mem_periodic_timer is not None:
             try:
@@ -1311,6 +1313,8 @@ class LiveTranslateApp:
                 f"discarding: {original_text[:60]}"
             )
             return
+
+        self._invalidate_live_preview(original_text)
 
         self._asr_count += 1
         self._msg_id += 1
@@ -1469,9 +1473,10 @@ class LiveTranslateApp:
         split_start = time.perf_counter()
         sentences = self._split_sentences(full_text, result["language"])
         split_ms = (time.perf_counter() - split_start) * 1000
-        # The last (still unfinished) sentence is previewed immediately
-        self._emit_live_preview((sentences[-1] if sentences else full_text).strip(), result["language"])
+        # The last (still unfinished) sentence becomes the live preview
+        preview_text = (sentences[-1] if sentences else full_text).strip()
         if len(sentences) <= 1:
+            self._emit_live_preview(preview_text, result["language"])
             return False
         log.debug(f"Interim split [{result['language']}] ({split_ms:.1f}ms): {len(sentences)} parts -> {sentences}")
 
@@ -1531,6 +1536,10 @@ class LiveTranslateApp:
 
             self._process_segment_text(text, result["language"], asr_ms)
             actually_committed = True
+
+        # Emit after the commits: finalizing the complete sentences invalidates a
+        # matching preview, which must not cancel the one we are about to show
+        self._emit_live_preview(preview_text, result["language"])
 
         if not actually_committed:
             return False
@@ -1606,10 +1615,28 @@ class LiveTranslateApp:
         if self._live_dirty and self._live_preview:
             self._start_live_worker()
 
-    def _clear_live_preview(self):
+    def _invalidate_live_preview(self, finalized_text=None):
+        """Cancel in-flight preview updates. With finalized_text, only when the current
+        preview is (part of) that sentence, so finalizing sentence A never cancels the
+        preview of sentence B that is still being spoken."""
+        live_text = self._live_last_text
+        if finalized_text is not None:
+            if not live_text:
+                return
+            final = finalized_text.strip()
+            related = (
+                live_text in final
+                or final in live_text
+                or (len(live_text) >= 6 and live_text[-6:] in final)
+            )
+            if not related:
+                return
         self._live_last_text = ""
         self._live_seq += 1
         self._live_dirty = False
+
+    def _clear_live_preview(self):
+        self._invalidate_live_preview()
         if self._subwin:
             self._subwin.clear_live()
 
@@ -1647,13 +1674,10 @@ class LiveTranslateApp:
     def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
         """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
         original_text = text.strip()
-        # A sentence is being finalized: invalidate in-flight preview updates so a late
-        # partial cannot re-show it as live; the next interim pass re-emits what is still spoken
-        self._live_seq += 1
-        self._live_last_text = ""
-        self._live_dirty = False
         if not original_text or not any(c.isalnum() for c in original_text):
             return
+        # A sentence is being finalized: a late partial of it must not re-show it as live
+        self._invalidate_live_preview(original_text)
 
         asr_lang_setting = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
         if asr_lang_setting != "auto" and source_lang != asr_lang_setting:

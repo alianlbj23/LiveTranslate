@@ -571,7 +571,7 @@ class SubtitleWindow(QWidget):
         self._live_timer.setSingleShot(True)
         self._live_timer.setInterval(4000)  # stale preview safety clear
         self._live_seq_shown = 0
-        self._live_timer.timeout.connect(lambda: self._on_live("", "", 0, 0))
+        self._live_timer.timeout.connect(self._on_live_timeout)
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
@@ -994,21 +994,30 @@ class SubtitleWindow(QWidget):
     def clear_live(self):
         self.live_signal.emit("", "", 0, 0)
 
+    def _drop_live(self):
+        """Remove the live line. _live_seq_shown stays monotonic on purpose so late
+        partials of an already finalized generation are still recognised as stale."""
+        self._live = None
+        self._live_timer.stop()
+
+    def _on_live_timeout(self):
+        self._on_live("", "", 0, 0)
+
     @pyqtSlot(str, str, int, int)
     def _on_live(self, original: str, translation: str, flags: int, seq: int):
         if not original:
             if self._live is None:
                 return
-            self._live = None
-            self._live_seq_shown = 0
-            self._live_timer.stop()
+            self._drop_live()
             self._refresh_display()
             return
 
-        if seq and self._live is not None and seq < self._live_seq_shown:
-            return  # stale update from an earlier preview generation
         if seq:
-            self._live_seq_shown = seq
+            if self._live is None and seq <= self._live_seq_shown:
+                return  # late update of a generation that was already finalized/cleared
+            if self._live is not None and seq < self._live_seq_shown:
+                return  # stale update from an earlier preview generation
+            self._live_seq_shown = max(self._live_seq_shown, seq)
 
         cur_o, cur_t = self._live if self._live is not None else ("", "")
         new_o, new_t = cur_o, cur_t
@@ -1016,10 +1025,16 @@ class SubtitleWindow(QWidget):
 
         if original != cur_o:
             if cur_o and cur_o.startswith(original):
-                # ASR momentarily produced a shorter prefix: keep the longer text, and
-                # its translation would describe the shorter text, so ignore it
-                new_o = cur_o
-                ignore_translation = True
+                if flags & self._LIVE_HAS_TL and flags & self._LIVE_COMPLETE and seq >= self._live_seq_shown:
+                    # ASR settled on the shorter text for the newest generation and its
+                    # complete translation is here: take both
+                    new_o, new_t = original, translation
+                    ignore_translation = True
+                else:
+                    # ASR momentarily produced a shorter prefix: keep the longer text, and
+                    # its translation would describe the shorter text, so ignore it
+                    new_o = cur_o
+                    ignore_translation = True
             elif cur_o and (original.startswith(cur_o) or original.startswith(cur_o[:max(4, len(cur_o) // 2)])):
                 # Same sentence growing / being refined: keep the shown translation for now
                 new_o = original
@@ -1096,12 +1111,11 @@ class SubtitleWindow(QWidget):
             same = bool(lo and original) and (
                 lo == original
                 or (len(lo) >= 4 and (original.startswith(lo) or lo.startswith(original)))
-                or (len(lo) >= 12 and lo[-8:] in original)
+                # leading characters re-recognised differently but the tail matches
+                or (len(lo) >= 6 and lo[-6:] in original)
             )
             if same:
-                self._live = None
-                self._live_seq_shown = 0
-                self._live_timer.stop()
+                self._drop_live()
 
         if self._is_hidden_by_timeout:
             self._restore_from_auto_hide()
@@ -1171,9 +1185,7 @@ class SubtitleWindow(QWidget):
 
     def clear(self):
         self._sentences.clear()
-        self._live = None
-        self._live_seq_shown = 0
-        self._live_timer.stop()
+        self._drop_live()
         self._cancel_pending_segments()
         self._auto_hide_timer.stop()
         self._is_hidden_by_timeout = False
