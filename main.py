@@ -1161,6 +1161,8 @@ class LiveTranslateApp:
                 self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, translated, tl_ms)
+            if self._panel:
+                self._panel.update_home_status(tl_ms=tl_ms)
                 self._overlay.update_stats(
                     self._asr_count,
                     self._translate_count,
@@ -1371,6 +1373,8 @@ class LiveTranslateApp:
             self._overlay.add_message(
                 msg_id, timestamp, original_text, source_lang, asr_ms
             )
+        if self._panel:
+            self._panel.update_home_status(asr_ms=asr_ms)
         self._transcript.write_original(msg_id, timestamp, original_text)
 
         # Store for subtitle window (translation will be added later)
@@ -1734,6 +1738,8 @@ class LiveTranslateApp:
 
         if self._overlay:
             self._overlay.add_message(msg_id, timestamp, original_text, source_lang, asr_ms)
+        if self._panel:
+            self._panel.update_home_status(asr_ms=asr_ms)
         self._transcript.write_original(msg_id, timestamp, original_text)
 
         self._last_original = original_text
@@ -2093,6 +2099,7 @@ def main():
             overlay.set_running(True)
             _is_running[0] = True
             pause_action.setText(t("tray_pause"))
+            panel.update_home_status(running=True)
         except Exception as e:
             log.error(f"Start error: {e}", exc_info=True)
 
@@ -2101,12 +2108,14 @@ def main():
         overlay.set_running(False)
         _is_running[0] = False
         pause_action.setText(t("tray_resume"))
+        panel.update_home_status(running=False)
 
     def on_resume():
         live_trans.resume()
         overlay.set_running(True)
         _is_running[0] = True
         pause_action.setText(t("tray_pause"))
+        panel.update_home_status(running=True)
 
     def on_toggle_pause():
         if _is_running[0]:
@@ -2115,6 +2124,9 @@ def main():
             on_resume()
 
     pause_action.triggered.connect(on_toggle_pause)
+    # Home page big button (Fluent control panel) mirrors the tray pause/resume
+    panel.start_requested.connect(on_resume)
+    panel.stop_requested.connect(on_pause)
     menu.addAction(pause_action)
     menu.addSeparator()
 
@@ -2257,17 +2269,10 @@ def main():
         overlay.set_subtitle_lock_state(bool(checked), subwin.is_click_through())
 
     def _open_subtitle_settings():
-        from PyQt6.QtWidgets import QTabWidget
-
         panel.show()
         panel.raise_()
         panel.activateWindow()
-        tabs = panel.findChild(QTabWidget)
-        if tabs is not None:
-            for i in range(tabs.count()):
-                if tabs.tabText(i) == t("tab_subtitle"):
-                    tabs.setCurrentIndex(i)
-                    break
+        panel.show_page("subtitle")
 
     subwin.lock_requested.connect(on_toggle_subwin_lock)
     subwin.settings_requested.connect(_open_subtitle_settings)

@@ -39,6 +39,8 @@ huggingface_hub>=0.20.0
 
 # UI
 PyQt6>=6.5.0
+# Win11 Fluent design for the control panel (FluentWindow, SettingCard, dark theme, Mica)
+PyQt6-Fluent-Widgets==1.11.3
 
 # torch & torchaudio - install separately with CUDA support:
 #   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
