@@ -1704,13 +1704,17 @@ class LiveTranslateApp:
                     stale = False
                     # Stream tokens into the subtitle window so the provisional
                     # translation grows word by word (YouTube-caption feel).
-                    for partial in translator.translate_iter(text, lang):
-                        if seq != self._live_seq:
-                            stale = True
-                            break
-                        out = partial
-                        if self._subwin and self._subwin.isVisible():
-                            self._subwin.update_live(text, partial, complete=False, seq=seq)
+                    partials = translator.translate_iter(text, lang)
+                    try:
+                        for partial in partials:
+                            if seq != self._live_seq:
+                                stale = True
+                                break
+                            out = partial
+                            if self._subwin and self._subwin.isVisible():
+                                self._subwin.update_live(text, partial, complete=False, seq=seq)
+                    finally:
+                        partials.close()  # release the HTTP stream now, never via the garbage collector
                     if stale:
                         continue
                     log.info(f"Live translate ({(time.perf_counter() - t0) * 1000:.0f}ms): {out}")

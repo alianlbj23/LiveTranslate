@@ -431,16 +431,20 @@ class Translator:
             stream = self._client.chat.completions.create(**base_kwargs)
 
         chunks = []
-        for chunk in self._stream_with_deadline(stream):
-            if hasattr(chunk, "usage") and chunk.usage:
-                self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
-                self._last_completion_tokens = chunk.usage.completion_tokens or 0
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    chunks.append(delta.content)
-                    if not self._json_response:
-                        yield self._post("".join(chunks))
+        try:
+            for chunk in self._stream_with_deadline(stream):
+                if hasattr(chunk, "usage") and chunk.usage:
+                    self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
+                    self._last_completion_tokens = chunk.usage.completion_tokens or 0
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        chunks.append(delta.content)
+                        if not self._json_response:
+                            yield self._post("".join(chunks))
+        finally:
+            # Also runs when the caller abandons the generator (stale live preview)
+            self._close_stream(stream)
         result = "".join(chunks).strip()
         if self._json_response:
             result = self._extract_json_translation(result)
@@ -480,6 +484,21 @@ class Translator:
             if text[plen:plen * 2] == text[:plen]:
                 return True
         return False
+
+    @staticmethod
+    def _close_stream(stream):
+        """Release the HTTP connection of a streaming response right now.
+
+        An OpenAI Stream that is dropped unread lives in a reference cycle and is only
+        closed later by the cyclic garbage collector. If that collection happens while
+        a thread holds httpcore's connection-pool lock, response.close() re-enters the
+        same non-reentrant lock: that thread deadlocks and every other translation
+        thread then waits on the pool forever (no error, no timeout). Closing is
+        idempotent, so the later finalizer becomes a no-op."""
+        try:
+            stream.close()
+        except Exception as e:
+            log.debug(f"stream close failed: {e}")
 
     def _stream_with_deadline(self, stream):
         """Iterate a streaming response under a hard wall-clock limit.
@@ -542,14 +561,17 @@ class Translator:
             stream = self._client.chat.completions.create(**base_kwargs)
 
         chunks = []
-        for chunk in self._stream_with_deadline(stream):
-            if hasattr(chunk, "usage") and chunk.usage:
-                self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
-                self._last_completion_tokens = chunk.usage.completion_tokens or 0
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    chunks.append(delta.content)
+        try:
+            for chunk in self._stream_with_deadline(stream):
+                if hasattr(chunk, "usage") and chunk.usage:
+                    self._last_prompt_tokens = chunk.usage.prompt_tokens or 0
+                    self._last_completion_tokens = chunk.usage.completion_tokens or 0
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        chunks.append(delta.content)
+        finally:
+            self._close_stream(stream)
         result = "".join(chunks).strip()
         if self._json_response:
             result = self._extract_json_translation(result)

@@ -94,12 +94,15 @@ def run_benchmark(models, source_lang, target_lang, timeout_s, prompt, result_ca
                     )
                     ttft = None
                     chunks = []
-                    for chunk in stream:
-                        if ttft is None:
-                            ttft = (time.perf_counter() - t0) * 1000
-                        delta = chunk.choices[0].delta
-                        if delta.content:
-                            chunks.append(delta.content)
+                    # `with` closes the stream even if a chunk breaks the loop; an unclosed
+                    # stream is closed later by the GC and can deadlock the connection pool
+                    with stream:
+                        for chunk in stream:
+                            if ttft is None:
+                                ttft = (time.perf_counter() - t0) * 1000
+                            delta = chunk.choices[0].delta
+                            if delta.content:
+                                chunks.append(delta.content)
                     total_ms = (time.perf_counter() - t0) * 1000
                     result_text = "".join(chunks).strip()
                     ttft = ttft or total_ms
