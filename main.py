@@ -1233,8 +1233,6 @@ class LiveTranslateApp:
                 self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, translated, tl_ms)
-            if self._panel:
-                self._panel.update_home_status(tl_ms=tl_ms)
                 self._overlay.update_stats(
                     self._asr_count,
                     self._translate_count,
@@ -1242,6 +1240,8 @@ class LiveTranslateApp:
                     self._total_completion_tokens,
                     cost,
                 )
+            if self._panel:
+                self._panel.update_home_status(tl_ms=tl_ms)
             if self._subwin and self._subwin.isVisible() and translated:
                 tl_dict = {self._target_language: translated}
                 if extra_langs:
