@@ -1,10 +1,9 @@
 ﻿# LiveTranslate 單一入口選單
-# 雙擊 LiveTranslate.bat 會開這個選單；$AutoStartSeconds 秒內沒按鍵就自動啟動雙字幕。
+# 雙擊 LiveTranslate.bat 會開這個選單；直接按 Enter = 第 1 項（啟動雙字幕），輸入數字進其他功能。
 # 也可直接指定動作（捷徑用）：powershell -File menu.ps1 -Action start | verify
 param(
     [ValidateSet("menu", "start", "verify", "setup")]
-    [string]$Action = "menu",
-    [int]$AutoStartSeconds = 3
+    [string]$Action = "menu"
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Root     = Split-Path -Parent $PSScriptRoot   # launcher\ 的上一層，搬資料夾也不用改
@@ -47,24 +46,6 @@ function Switch-Model {
     Write-Host "已切換為 $Model（LiveTranslate 重新啟動後生效）。" -ForegroundColor Green
 }
 
-function Wait-ForKey {
-    # 等 $Seconds 秒；有按鍵就回傳該字元，逾時回傳 $null。主控台不支援時改用 Read-Host。
-    param([int]$Seconds)
-    try {
-        $end = (Get-Date).AddSeconds($Seconds)
-        while ((Get-Date) -lt $end) {
-            if ($host.UI.RawUI.KeyAvailable) {
-                $k = $host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                return [string]$k.Character
-            }
-            Start-Sleep -Milliseconds 100
-        }
-        return $null
-    } catch {
-        return (Read-Host "請輸入數字（直接 Enter = 啟動雙字幕）")
-    }
-}
-
 function Invoke-Choice {
     param([string]$Choice)
     switch ($Choice.Trim()) {
@@ -92,24 +73,16 @@ if (-not (Test-Path $Python) -or -not (Test-Path $ReadyMarker)) {
 if ($Action -eq "start")  { & $StartScript;  exit $LASTEXITCODE }
 if ($Action -eq "verify") { & $VerifyScript; exit $LASTEXITCODE }
 
-$first = $true
 while ($true) {
     Write-Host ""
     Write-Host "============ LiveTranslate ============" -ForegroundColor Magenta
-    Write-Host " 1) 啟動日文雙字幕                （預設）"
+    Write-Host " 1) 啟動日文雙字幕                （預設：直接按 Enter）"
     Write-Host " 2) 檢查 GPU / Ollama / 翻譯是否正常"
     Write-Host " 3) 切換翻譯模型為 qwen3.5:4b（顯示記憶體不足時用）"
     Write-Host " 4) 切換翻譯模型為 qwen3.5:9b（預設，品質較好）"
     Write-Host " 5) 開啟安裝說明 INSTALL_GUIDE.md"
     Write-Host "    （每次啟動會自動檢查更新；按「結束」關閉程式就會釋放顯示卡）" -ForegroundColor DarkGray
     Write-Host " 0) 離開"
-    if ($first -and $AutoStartSeconds -gt 0) {
-        Write-Host " $AutoStartSeconds 秒內沒按鍵就自動啟動雙字幕；要用其他功能請按數字。" -ForegroundColor DarkGray
-        $choice = Wait-ForKey $AutoStartSeconds
-        if ($null -eq $choice) { $choice = "1" }
-        $first = $false
-    } else {
-        $choice = Read-Host "請輸入數字"
-    }
+    $choice = Read-Host "請輸入數字（直接按 Enter = 啟動）"
     Invoke-Choice $choice
 }
