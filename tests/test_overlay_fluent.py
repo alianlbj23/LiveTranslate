@@ -39,7 +39,7 @@ def test_header_uses_fluent_icon_buttons_with_tooltips(qapp):
     plain = [b for b in h.findChildren(QPushButton) if type(b) is QPushButton]
     assert not plain, "text buttons should be Fluent icon buttons"
     buttons = h.findChildren(TransparentToolButton) + h.findChildren(TransparentToggleToolButton)
-    assert len(buttons) >= 12
+    assert len(buttons) >= 11
     for b in buttons:
         assert b.toolTip().strip(), f"{b.objectName() or b} has no tooltip"
         assert not b.icon().isNull()
@@ -69,10 +69,9 @@ def test_toggle_buttons_keep_main_py_api(qapp):
 def test_action_buttons_emit_the_same_signals(qapp):
     h = so.DragHandle()
     got = []
-    for sig in ("hide_clicked", "subtitle_clicked", "clear_clicked", "settings_clicked", "quit_clicked",
+    for sig in ("subtitle_clicked", "clear_clicked", "settings_clicked", "quit_clicked",
                 "start_clicked", "stop_clicked"):
         getattr(h, sig).connect(lambda *_a, s=sig: got.append(s))
-    h._hide_btn.click()
     h._subtitle_btn.click()
     h._clear_btn.click()
     h._settings_btn.click()
@@ -81,8 +80,17 @@ def test_action_buttons_emit_the_same_signals(qapp):
     h._start_stop_btn.click()
     h.set_running(True)
     h._start_stop_btn.click()
-    assert got == ["hide_clicked", "subtitle_clicked", "clear_clicked", "settings_clicked", "quit_clicked",
+    assert got == ["subtitle_clicked", "clear_clicked", "settings_clicked", "quit_clicked",
                    "start_clicked", "stop_clicked"]
+
+
+def test_header_has_no_hide_button(qapp):
+    """The "hide this window" header button was removed on request (2026-10-19);
+    the tray menu still shows / hides the window."""
+    h = so.DragHandle()
+    assert not hasattr(h, "_hide_btn")
+    assert not hasattr(so.DragHandle, "hide_clicked")
+    assert not hasattr(so.SubtitleOverlay, "hide_requested")
 
 
 def test_running_state_changes_icon_tooltip(qapp):

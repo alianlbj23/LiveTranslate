@@ -2668,7 +2668,6 @@ def main():
     overlay.model_switch_requested.connect(on_overlay_model_switch)
     overlay.start_requested.connect(on_resume)
     overlay.stop_requested.connect(on_pause)
-    overlay.hide_requested.connect(on_toggle_overlay)
     overlay.quit_requested.connect(on_quit)
 
     tray.setContextMenu(menu)

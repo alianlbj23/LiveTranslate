@@ -4,7 +4,7 @@ import re
 
 import psutil
 from i18n import t, LANGUAGES
-from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication,
@@ -648,7 +648,6 @@ class DragHandle(QWidget):
     start_clicked = pyqtSignal()
     stop_clicked = pyqtSignal()
     clear_clicked = pyqtSignal()
-    hide_clicked = pyqtSignal()
     quit_clicked = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
@@ -682,10 +681,6 @@ class DragHandle(QWidget):
         drag_layout.addWidget(title)
         drag_layout.addStretch()
         row1.addWidget(drag, 1)
-
-        self._hide_btn = _icon_button(FIF.HIDE, t("ovl_tip_hide"))
-        self._hide_btn.clicked.connect(self.hide_clicked.emit)
-        row1.addWidget(self._hide_btn)
 
         # Checked while the subtitle window is shown (state is set by main via set_subtitle_checked)
         self._subtitle_btn = _icon_button(FIF.FONT, t("ovl_tip_subtitle"), toggle=True)
@@ -915,6 +910,56 @@ class DragHandle(QWidget):
         self._subtitle_btn.setChecked(bool(checked))
 
 
+class _EdgeResizeHandle(QWidget):
+    """Invisible strip along the top or bottom edge of the card (inside the shadow
+    margin) that stretches the frameless window up or down. Uses the native system
+    resize where the platform supports it, otherwise resizes the window itself."""
+
+    def __init__(self, edge: Qt.Edge, parent=None):
+        super().__init__(parent)
+        self._edge = edge
+        self._start = None  # (mouse global y, window geometry) during a manual resize
+        self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+
+    def edge(self) -> Qt.Edge:
+        return self._edge
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        win = self.window()
+        handle = win.windowHandle()
+        if handle is not None and handle.startSystemResize(self._edge):
+            self._start = None
+        else:
+            self._start = (event.globalPosition().toPoint().y(), QRect(win.geometry()))
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._start is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        y0, geo = self._start
+        dy = event.globalPosition().toPoint().y() - y0
+        win = self.window()
+        lo, hi = win.minimumHeight(), win.maximumHeight()
+        if self._edge == Qt.Edge.BottomEdge:
+            h = max(lo, min(hi, geo.height() + dy))
+            win.setGeometry(geo.x(), geo.y(), geo.width(), h)
+        else:
+            h = max(lo, min(hi, geo.height() - dy))
+            win.setGeometry(geo.x(), geo.y() + geo.height() - h, geo.width(), h)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._start is not None:
+            self._start = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class _StatusSection(QWidget):
     """Collapsible "狀態" block holding the MonitorBar (MIC/RMS/VAD bars, CPU/GPU, counters).
     Collapsed by default so the card shows only the conversation."""
@@ -966,7 +1011,6 @@ class SubtitleOverlay(QWidget):
     model_switch_requested = pyqtSignal(int)
     start_requested = pyqtSignal()
     stop_requested = pyqtSignal()
-    hide_requested = pyqtSignal()
     quit_requested = pyqtSignal()
     subtitle_toggled = pyqtSignal()
     subtitle_lock_toggled = pyqtSignal(bool)
@@ -1052,7 +1096,6 @@ class SubtitleOverlay(QWidget):
         self._handle.model_changed.connect(self.model_switch_requested.emit)
         self._handle.start_clicked.connect(self.start_requested.emit)
         self._handle.stop_clicked.connect(self.stop_requested.emit)
-        self._handle.hide_clicked.connect(self.hide_requested.emit)
         self._handle.clear_clicked.connect(self._on_clear)
         self._handle.quit_clicked.connect(self.quit_requested.emit)
         self._handle.mode_changed.connect(self._on_mode_changed)
@@ -1105,6 +1148,11 @@ class SubtitleOverlay(QWidget):
         main_layout.addWidget(self._container)
         self._apply_card_style(_sanitize_style(DEFAULT_STYLE))
 
+        # Stretch the window up / down by its top or bottom edge
+        self._top_resize = _EdgeResizeHandle(Qt.Edge.TopEdge, self)
+        self._bottom_resize = _EdgeResizeHandle(Qt.Edge.BottomEdge, self)
+        self._place_resize_handles()
+
         self._ct_timer = QTimer(self)
         self._ct_timer.timeout.connect(self._check_click_through)
         self._ct_timer.start(50)
@@ -1118,6 +1166,9 @@ class SubtitleOverlay(QWidget):
         super().paintEvent(event)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Near-invisible fill: fully transparent pixels of a translucent window do not
+        # receive the mouse on Windows, and the margin hosts the resize handles
+        p.fillRect(self.rect(), QColor(0, 0, 0, 1))
         card = QRectF(self._container.geometry()).translated(0, 2)
         r = float(self._card_radius)
         n = self._SHADOW
@@ -1144,7 +1195,19 @@ class SubtitleOverlay(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._place_resize_handles()
         self._schedule_pos_save()
+
+    def _place_resize_handles(self):
+        if not hasattr(self, "_top_resize"):
+            return
+        m = self._SHADOW
+        band = m + 4  # the shadow margin plus a few px of the card's own padding
+        card_w = max(0, self.width() - 2 * m)
+        self._top_resize.setGeometry(m, 0, card_w, band)
+        self._bottom_resize.setGeometry(m, self.height() - band, card_w, band)
+        self._top_resize.raise_()
+        self._bottom_resize.raise_()
 
     def set_running(self, running: bool):
         self._handle.set_running(running)

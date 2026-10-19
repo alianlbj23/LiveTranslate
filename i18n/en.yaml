@@ -353,7 +353,6 @@ subwin_anim_slide_up: "Slide Up"
 subwin_anim_slide_down: "Slide Down"
 
 # Overlay header tooltips / status section
-ovl_tip_hide: "Hide this window"
 ovl_tip_subtitle: "Show / hide the subtitle window"
 ovl_tip_start: "Paused - click to start"
 ovl_tip_pause: "Running - click to pause"

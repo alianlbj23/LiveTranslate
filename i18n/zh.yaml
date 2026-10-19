@@ -352,7 +352,6 @@ subwin_anim_slide_up: "从下滑入"
 subwin_anim_slide_down: "从上滑入"
 
 # Overlay header tooltips / status section
-ovl_tip_hide: "隐藏对话记录窗口"
 ovl_tip_subtitle: "显示/隐藏字幕窗口"
 ovl_tip_start: "已暂停，点击开始"
 ovl_tip_pause: "运行中，点击暂停"

@@ -96,7 +96,8 @@ Standalone transparent window for OBS capture, separate from the main overlay:
 The window is a rounded (12 px), ~85 % opaque dark card with a soft shadow painted in `SubtitleOverlay.paintEvent` (transparent `_SHADOW` margin around `#overlayCard`). Card / header style sheets are scoped by object name (`#overlayCard`, `#overlayHeader`) so they do not cascade into the Fluent widgets inside.
 
 DragHandle is a 2-row header bar built from PyQt6-Fluent-Widgets (icon-only buttons, tooltips via `ToolTipFilter`):
-- **Row 1**: Draggable title + `TransparentToolButton` icons (Hide, Subtitle toggle + ▾ options menu, Run/Pause, Clear, Full/Compact, Settings, Quit)
+- **Row 1**: Draggable title + `TransparentToolButton` icons (Subtitle toggle + ▾ options menu, Run/Pause, Clear, Full/Compact, Settings, Quit). There is no hide button; the tray menu shows / hides the window
+- The frameless window is stretched up / down with `_EdgeResizeHandle` strips along the card's top and bottom edges (native `startSystemResize`, manual fallback)
 - **Row 2**: `TransparentToggleToolButton` toggles (Click-through, Top-most, Auto-scroll, Taskbar; attribute names `_ct_check`/`_topmost_check`/`_auto_scroll`/`_taskbar_check` are used by main.py's tray sync) + Fluent `ComboBox` for model / source / target language (items carry the language code as `userData`)
 
 MonitorBar (MIC/RMS/VAD bars, ASR device, CPU/RAM/GPU, ASR/TL counts, tokens and cost) sits in `_StatusSection`, a collapsible "狀態" block that is collapsed by default and hidden in compact mode.
