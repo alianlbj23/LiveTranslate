@@ -124,6 +124,7 @@ Key overlay features:
 ### Settings UX
 
 - **Auto-save with debounce**: All control panel settings (combos, spinboxes) auto-save after 300ms debounce via `_auto_save()` → `_do_auto_save()`. No manual Save button needed.
+- **Factory reset** (home page → 維護 → 回復原廠設定, confirm dialog): `factory_defaults.py` is the single source of the install-time values (also used by `launcher/write_settings.py`). `factory_reset()` restores every tunable value, keeps `KEEP_ON_RESET` (model list / connection, ASR model, audio devices, hub) and drops window positions; `ControlPanel.restore_factory_settings()` refreshes the widgets, applies, saves and emits `reset_positions`
 - **Slider special handling**: VAD/Energy sliders update labels in real-time but only trigger save on `sliderReleased` (mouse) or immediately for keyboard input (`isSliderDown()` check).
 - **Prompt auto-apply**: System prompt TextEdit uses 600ms debounce via `textChanged` signal — no manual Apply button needed.
 - **Cache path**: Default `./models/` (not `~/.cache`). Applied at startup in `main.py` before `import torch` via `model_manager.apply_cache_env()`.
@@ -158,7 +159,7 @@ Continuous speech is processed incrementally to reduce latency (enabled by `incr
 - **Progressive silence**: Buffer越长接受越短的停顿切分 (<3s=full, 3-6s=half, 6-10s=quarter of silence_limit)
 - **Adaptive silence**: Tracks recent pause durations, sets threshold to P75 × 1.2, auto-adjusts between 0.3s~2.0s
 - **Backtrack split**: Max duration时回溯smoothed confidence history找最低谷切分，remainder保留到下一段
-- **Speech density filter**: `_flush_segment()` discards segments where <25% of chunks are above confidence threshold
+- **Speech density filter**: `_flush_segment()` discards segments where fewer chunks than `min_speech_density` are above the confidence threshold. Setting `vad_min_speech_density` (default 0.25, 0 disables, validated 0-0.9) on the control panel's timing group; lower keeps short replies such as 「え？」
 - **Short segment merge**: Segments below `min_speech_duration` are NOT discarded — VAD does a soft-reset (`_is_speaking=False`) but keeps the buffer, which naturally merges with the next speech onset
 - **Trimmed segment handling**: `_was_trimmed` flag (set by `trim_front`) ensures interim ASR remainders are `force_flush()`ed instead of being dropped by min_speech check
 

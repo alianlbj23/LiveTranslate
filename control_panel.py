@@ -16,6 +16,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    InfoBar,
+    MessageBox,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -152,6 +154,30 @@ class _BlockCard(CardWidget):
         self.vbox.setSpacing(8)
         self.title_label = StrongBodyLabel(title, self)
         self.vbox.addWidget(self.title_label)
+
+
+DEFAULT_MIN_SPEECH_DENSITY = 0.25
+
+
+def _prompt_preset_index(prompt) -> int:
+    """Index in the prompt preset combo (daily, esports, anime, webid, custom)."""
+    from translator import DEFAULT_PROMPT, PROMPT_PRESETS
+
+    text = (prompt or "").strip()
+    if text == DEFAULT_PROMPT.strip():
+        return 0
+    for i, key in enumerate(["daily", "esports", "anime", "webid"]):
+        if text == PROMPT_PRESETS[key].strip():
+            return i
+    return 4  # custom
+
+
+def _density_percent(value) -> int:
+    """vad_min_speech_density from user_settings.json (0-0.9) as a whole percent;
+    anything else falls back to the 25 % default."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0.0 <= value <= 0.9:
+        return int(round(value * 100))
+    return int(round(DEFAULT_MIN_SPEECH_DENSITY * 100))
 
 
 def _set_text_color(label, pair):
@@ -360,6 +386,14 @@ class ControlPanel(FluentWindow):
         for card in (self._home_engine_card, self._home_model_card, self._home_asr_card, self._home_tl_card):
             info.addSettingCard(card)
         page.add_group(info)
+
+        maint = SettingCardGroup(t("group_maintenance"), page.view)
+        self._factory_reset_btn = PushButton(t("btn_factory_reset"))
+        self._factory_reset_btn.clicked.connect(self._on_factory_reset_clicked)
+        maint.addSettingCard(_WidgetCard(
+            FIF.HISTORY, t("label_factory_reset"), self._factory_reset_btn, content=t("desc_factory_reset"),
+        ))
+        page.add_group(maint)
         page.finish()
         return page
 
@@ -698,6 +732,19 @@ class ControlPanel(FluentWindow):
         self._silence_duration.valueChanged.connect(self._auto_save)
         timing_group.addSettingCard(_WidgetCard(FIF.PAUSE, t("label_silence_dur"), self._silence_duration))
 
+        # Share of a segment that must be speech; lower keeps short replies (「え？」)
+        self._min_density_spin = SpinBox()
+        self._min_density_spin.setRange(0, 90)
+        self._min_density_spin.setSingleStep(5)
+        self._min_density_spin.setSuffix("%")
+        self._min_density_spin.setValue(_density_percent(s.get("vad_min_speech_density")))
+        self._min_density_spin.valueChanged.connect(self._on_timing_changed)
+        self._min_density_spin.valueChanged.connect(self._auto_save)
+        timing_group.addSettingCard(_WidgetCard(
+            FIF.FILTER, t("label_min_speech_density"), self._min_density_spin,
+            content=t("desc_min_speech_density"),
+        ))
+
         self._incremental_asr_cb = SwitchButton()
         self._incremental_asr_cb.setOnText(t("label_incremental_asr"))
         self._incremental_asr_cb.setOffText(t("label_incremental_asr"))
@@ -781,7 +828,7 @@ class ControlPanel(FluentWindow):
         models_card.vbox.addLayout(btn_row)
         page.vbox.addWidget(models_card)
 
-        from translator import DEFAULT_PROMPT, PROMPT_PRESETS
+        from translator import DEFAULT_PROMPT
 
         prompt_group = SettingCardGroup(t("group_system_prompt"), page.view)
         self._prompt_preset = ComboBox()
@@ -792,14 +839,7 @@ class ControlPanel(FluentWindow):
         self._prompt_preset.addItem(t("prompt_custom"), userData="custom")
 
         current_prompt = s.get("system_prompt", DEFAULT_PROMPT)
-        preset_idx = 4  # default to custom
-        for i, key in enumerate(["daily", "esports", "anime", "webid"]):
-            if current_prompt.strip() == PROMPT_PRESETS[key].strip():
-                preset_idx = i
-                break
-        if current_prompt.strip() == DEFAULT_PROMPT.strip():
-            preset_idx = 0
-        self._prompt_preset.setCurrentIndex(preset_idx)
+        self._prompt_preset.setCurrentIndex(_prompt_preset_index(current_prompt))
         self._prompt_preset.currentIndexChanged.connect(self._on_prompt_preset_changed)
         prompt_group.addSettingCard(_WidgetCard(FIF.DICTIONARY, t("label_prompt_preset"), self._prompt_preset, stretch=True))
         page.add_group(prompt_group)
@@ -1539,6 +1579,8 @@ class ControlPanel(FluentWindow):
             "auto" if self._silence_mode.currentIndex() == 0 else "fixed"
         )
         self._current_settings["silence_duration"] = round(self._silence_duration.value(), 2)
+        if hasattr(self, "_min_density_spin"):
+            self._current_settings["vad_min_speech_density"] = round(self._min_density_spin.value() / 100, 2)
         self._current_settings["incremental_asr"] = self._incremental_asr_cb.isChecked()
         self._current_settings["interim_interval"] = round(self._interim_interval_spin.value(), 2)
         self._current_settings["live_preview"] = self._live_preview_cb.isChecked()
@@ -1659,6 +1701,91 @@ class ControlPanel(FluentWindow):
 
     def get_settings(self):
         return dict(self._current_settings)
+
+    # --- 回復原廠設定 ---
+    def _on_factory_reset_clicked(self):
+        box = MessageBox(t("factory_reset_title"), t("factory_reset_confirm"), self)
+        if not box.exec():
+            return
+        lang_changed = self.restore_factory_settings()
+        InfoBar.success(
+            t("factory_reset_title"),
+            t("factory_reset_done") + (t("factory_reset_restart_lang") if lang_changed else ""),
+            parent=self, duration=4000,
+        )
+
+    def restore_factory_settings(self) -> bool:
+        """Put every tunable value back to the install defaults (factory_defaults.py),
+        keep the model list / connection, ASR model and audio devices, apply it at once
+        and reset both window positions. Returns True when the UI language changed
+        (that one needs a restart)."""
+        from factory_defaults import factory_reset
+
+        old_lang = self._current_settings.get("ui_lang")
+        new = factory_reset(self._current_settings)
+        self._current_settings = new
+        self._load_tunable_into_widgets(new)
+        self._apply_settings()  # widgets -> settings, emits settings_changed (VAD, translator, overlay style)
+        _save_settings(self._current_settings)
+        # Subtitle window: push the factory subtitle settings through the normal page path
+        self.update_subtitle_settings(dict(new.get("subtitle_mode") or {}))
+        self._subtitle_widget.get_settings()  # emits -> _on_subtitle_settings_changed -> main
+        self.reset_positions.emit()
+        log.info("Factory settings restored (models, ASR model and audio devices kept)")
+        return new.get("ui_lang") != old_lang
+
+    def _load_tunable_into_widgets(self, s: dict):
+        """Show the values of `s` in every tunable control without triggering auto-save."""
+        widgets = [
+            self._asr_lang, self._whisper_pad_seconds, self._sensevoice_pad_seconds, self._ui_lang_combo,
+            self._vad_mode, self._vad_threshold_slider, self._energy_slider, self._min_speech, self._max_speech,
+            self._silence_mode, self._silence_duration, self._min_density_spin, self._incremental_asr_cb,
+            self._interim_interval_spin, self._live_preview_cb, self._prompt_preset, self._prompt_edit,
+            self._timeout_spin, self._auto_save_transcript_cb, self._style_preset,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            idx = self._asr_lang.findData(s["asr_language"])
+            if idx >= 0:
+                self._asr_lang.setCurrentIndex(idx)
+            self._whisper_pad_seconds.setValue(s["whisper_pad_seconds"])
+            self._sensevoice_pad_seconds.setValue(s["sensevoice_pad_seconds"])
+            self._ui_lang_combo.setCurrentIndex({"en": 0, "zh": 1, "zh_TW": 2}.get(s["ui_lang"], 2))
+            self._vad_mode.setCurrentIndex({"silero": 0, "energy": 1, "disabled": 2}.get(s["vad_mode"], 0))
+            vad_pct = round(s["vad_threshold"] * 100)
+            self._vad_threshold_slider.setValue(vad_pct)
+            self._vad_threshold_label.setText(f"{vad_pct}%")
+            energy_pm = round(s["energy_threshold"] * 1000)
+            self._energy_slider.setValue(energy_pm)
+            self._energy_label.setText(f"{energy_pm}\u2030")
+            self._min_speech.setValue(s["min_speech_duration"])
+            self._max_speech.setValue(s["max_speech_duration"])
+            fixed = s["silence_mode"] == "fixed"
+            self._silence_mode.setCurrentIndex(1 if fixed else 0)
+            self._silence_duration.setValue(s["silence_duration"])
+            self._silence_duration.setEnabled(fixed)
+            self._min_density_spin.setValue(_density_percent(s["vad_min_speech_density"]))
+            self._incremental_asr_cb.setChecked(s["incremental_asr"])
+            self._interim_interval_spin.setValue(s["interim_interval"])
+            self._interim_interval_spin.setEnabled(s["incremental_asr"])
+            self._live_preview_cb.setChecked(s["live_preview"])
+            self._live_preview_cb.setEnabled(s["incremental_asr"])
+            self._prompt_edit.setPlainText(s["system_prompt"])
+            self._prompt_preset.setCurrentIndex(_prompt_preset_index(s["system_prompt"]))
+            self._timeout_spin.setValue(s["timeout"])
+            self._auto_save_transcript_cb.setChecked(s["auto_save_transcript"])
+            preset = s["style"].get("preset", "custom")
+            if preset in self._preset_keys:
+                self._style_preset.setCurrentIndex(self._preset_keys.index(preset))
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self._block_style_signals(True)
+        try:
+            self._apply_style_to_controls(s["style"])
+        finally:
+            self._block_style_signals(False)
 
     def get_active_model(self) -> dict | None:
         models = self._current_settings.get("models", [])

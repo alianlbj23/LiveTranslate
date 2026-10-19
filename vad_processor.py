@@ -23,6 +23,9 @@ class VADProcessor:
         self.sample_rate = sample_rate
         self.threshold = threshold
         self.energy_threshold = 0.02
+        # Segments where fewer chunks than this are speech are discarded (noise bursts).
+        # Setting: vad_min_speech_density; lower keeps short replies like 「え？」.
+        self.min_speech_density = 0.25
         self.min_speech_samples = int(min_speech_duration * sample_rate)
         self.max_speech_samples = int(max_speech_duration * sample_rate)
         self._chunk_duration = chunk_duration
@@ -109,6 +112,15 @@ class VADProcessor:
             self.max_speech_samples = int(
                 settings["max_speech_duration"] * self.sample_rate
             )
+        if "vad_min_speech_density" in settings:
+            v = settings["vad_min_speech_density"]
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= v <= 0.9:
+                self.min_speech_density = float(v)
+            else:
+                log.warning(
+                    f"Ignoring invalid vad_min_speech_density={v!r} (expected 0-0.9), "
+                    f"keeping {self.min_speech_density}"
+                )
         if "silence_mode" in settings:
             self._silence_mode = settings["silence_mode"]
         if "silence_duration" in settings:
@@ -117,6 +129,7 @@ class VADProcessor:
                 self._silence_limit = self._seconds_to_chunks(self._fixed_silence_dur)
         log.info(
             f"VAD settings updated: mode={self.mode}, threshold={self.threshold}, "
+            f"min_speech_density={self.min_speech_density:.0%}, "
             f"silence={self._silence_mode} "
             f"({self._silence_limit} chunks = {self._silence_limit * self._chunk_duration:.2f}s)"
         )
@@ -324,7 +337,7 @@ class VADProcessor:
                 1 for c in self._confidence_history if c >= effective_threshold
             )
             density = voiced / len(self._confidence_history)
-            if density < 0.25:
+            if density < self.min_speech_density:
                 dur = self._speech_samples / self.sample_rate
                 log.debug(
                     f"Low speech density {density:.0%} ({voiced}/{len(self._confidence_history)}), "
