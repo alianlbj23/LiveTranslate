@@ -178,6 +178,11 @@ class _TrayNotifier(QObject):
 
 
 class LiveTranslateApp:
+    # Guards _tl_inflight: incremented on the ASR thread, decremented on the translation
+    # workers; `x += 1` / `x = max(0, x - 1)` are not atomic and lost updates left the
+    # counter permanently high (false "translations are queuing" warnings).
+    _tl_lock = threading.Lock()
+
     def __init__(self, config):
         self._config = config
         self._running = False
@@ -1128,21 +1133,24 @@ class LiveTranslateApp:
 
     def _submit_translation(self, msg_id, text, source_lang, extra_langs=None):
         """Queue a translation and track how many are in flight."""
-        self._tl_inflight += 1
+        with self._tl_lock:
+            self._tl_inflight += 1
         self._check_translation_backlog()
         try:
             self._tl_executor.submit(
                 self._translate_async_tracked, msg_id, text, source_lang, extra_langs
             )
         except RuntimeError:
-            self._tl_inflight = max(0, self._tl_inflight - 1)
+            with self._tl_lock:
+                self._tl_inflight = max(0, self._tl_inflight - 1)
             raise
 
     def _translate_async_tracked(self, msg_id, text, source_lang, extra_langs=None):
         try:
             self._translate_async(msg_id, text, source_lang, extra_langs)
         finally:
-            self._tl_inflight = max(0, self._tl_inflight - 1)
+            with self._tl_lock:
+                self._tl_inflight = max(0, self._tl_inflight - 1)
 
     def _check_translation_backlog(self):
         n = self._tl_inflight
