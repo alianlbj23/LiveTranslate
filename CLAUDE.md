@@ -92,15 +92,18 @@ Standalone transparent window for OBS capture, separate from the main overlay:
 
 ### Overlay UI (subtitle_overlay.py)
 
-DragHandle is a 2-row header bar:
-- **Row 1**: Draggable title + action buttons (Hide, Subtitle, Paused/Running, Clear, Full/Compact, Settings, Quit)
-- **Row 2**: Checkboxes (Click-through, Top-most, Auto-scroll, Taskbar) + Model combo + Target Language combo
+The window is a rounded (12 px), ~85 % opaque dark card with a soft shadow painted in `SubtitleOverlay.paintEvent` (transparent `_SHADOW` margin around `#overlayCard`). Card / header style sheets are scoped by object name (`#overlayCard`, `#overlayHeader`) so they do not cascade into the Fluent widgets inside.
 
-MonitorBar displays: ASR device, CPU/RAM/GPU usage, ASR/TL counts, token usage with cost estimation (¥/$ based on UI language).
+DragHandle is a 2-row header bar built from PyQt6-Fluent-Widgets (icon-only buttons, tooltips via `ToolTipFilter`):
+- **Row 1**: Draggable title + `TransparentToolButton` icons (Hide, Subtitle toggle + ▾ options menu, Run/Pause, Clear, Full/Compact, Settings, Quit)
+- **Row 2**: `TransparentToggleToolButton` toggles (Click-through, Top-most, Auto-scroll, Taskbar; attribute names `_ct_check`/`_topmost_check`/`_auto_scroll`/`_taskbar_check` are used by main.py's tray sync) + Fluent `ComboBox` for model / source / target language (items carry the language code as `userData`)
+
+MonitorBar (MIC/RMS/VAD bars, ASR device, CPU/RAM/GPU, ASR/TL counts, tokens and cost) sits in `_StatusSection`, a collapsible "狀態" block that is collapsed by default and hidden in compact mode.
 
 Style system:
 - `DEFAULT_STYLE` and `STYLE_PRESETS` defined in `subtitle_overlay.py` — 14 presets including terminal themes (Dracula, Nord, Monokai, Solarized, Gruvbox, Tokyo Night, Catppuccin, One Dark, Everforest, Kanagawa)
-- Default style is high-contrast (pure black background, white translation text, 14pt)
+- Default style is a translucent dark card (`#16161d` at 85 %, 12 px radius); original text small grey, translation 15pt white semi-bold, timestamps / ASR / TL latency as faint 8pt tags
+- `_sanitize_style()` validates the style from user_settings.json (hex colours, clamped numbers) before it is applied
 - Original and translation text have independent `font_family` fields (`original_font_family`, `translation_font_family`)
 - `SubtitleOverlay.apply_style(style)` updates container/header backgrounds, window opacity, and rebuilds all message HTML
 - Style dict stored in `user_settings.json` under `"style"` key; forwarded via `settings_changed` signal → `main.py` → `overlay.apply_style()`

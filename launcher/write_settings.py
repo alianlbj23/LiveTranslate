@@ -24,21 +24,22 @@ SYSTEM_PROMPT = (
     "今日も配信見に来てくれてありがとう → 謝謝大家今天也來看直播"
 )
 
+# Same look as subtitle_overlay.DEFAULT_STYLE (translucent dark card), with Traditional Chinese fonts
 STYLE = {
     "preset": "custom",
-    "bg_color": "#000000",
-    "bg_opacity": 240,
-    "header_color": "#1a1a2e",
-    "header_opacity": 230,
-    "border_radius": 8,
+    "bg_color": "#16161d",
+    "bg_opacity": 217,
+    "header_color": "#ffffff",
+    "header_opacity": 8,
+    "border_radius": 12,
     "original_font_family": "Microsoft JhengHei",
     "translation_font_family": "Microsoft JhengHei",
-    "original_font_size": 11,
+    "original_font_size": 10,
     "translation_font_size": 15,
-    "original_color": "#cccccc",
+    "original_color": "#9a9aa8",
     "translation_color": "#ffffff",
-    "timestamp_color": "#888899",
-    "window_opacity": 95,
+    "timestamp_color": "#6c6c7c",
+    "window_opacity": 100,
 }
 
 

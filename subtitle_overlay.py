@@ -1,46 +1,56 @@
 import ctypes
 import os
+import re
 
 import psutil
 from i18n import t, LANGUAGES
-from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QCursor, QFont
+from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
     QMessageBox,
     QProgressBar,
-    QPushButton,
     QScrollArea,
     QSizeGrip,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import (
+    ComboBox,
+    FluentIcon as FIF,
+    IconWidget,
+    ToolTipFilter,
+    ToolTipPosition,
+    TransparentPushButton,
+    TransparentToggleToolButton,
+    TransparentToolButton,
+    VerticalSeparator,
+)
 
 _GWL_EXSTYLE = -20
 _WS_EX_TRANSPARENT = 0x20
 
+# Translucent dark card: about 85 % opaque, 12 px corners; the header only tints the card
 DEFAULT_STYLE = {
     "preset": "default",
-    "bg_color": "#000000",
-    "bg_opacity": 240,
-    "header_color": "#1a1a2e",
-    "header_opacity": 230,
-    "border_radius": 8,
+    "bg_color": "#16161d",
+    "bg_opacity": 217,
+    "header_color": "#ffffff",
+    "header_opacity": 8,
+    "border_radius": 12,
     "original_font_family": "Microsoft YaHei",
     "translation_font_family": "Microsoft YaHei",
-    "original_font_size": 11,
-    "translation_font_size": 14,
-    "original_color": "#cccccc",
+    "original_font_size": 10,
+    "translation_font_size": 15,
+    "original_color": "#9a9aa8",
     "translation_color": "#ffffff",
-    "timestamp_color": "#888899",
-    "window_opacity": 95,
+    "timestamp_color": "#6c6c7c",
+    "window_opacity": 100,
 }
 
 _BASE = DEFAULT_STYLE
@@ -190,10 +200,41 @@ def _hex_to_rgba(hex_color: str, opacity: int) -> str:
     return f"rgba({r},{g},{b},{opacity})"
 
 
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_STYLE_COLOR_KEYS = ("bg_color", "header_color", "original_color", "translation_color", "timestamp_color")
+_STYLE_INT_RANGES = {
+    "bg_opacity": (0, 255),
+    "header_opacity": (0, 255),
+    "border_radius": (0, 30),
+    "original_font_size": (6, 48),
+    "translation_font_size": (6, 48),
+    "window_opacity": (20, 100),
+}
+
+
+def _sanitize_style(style) -> dict:
+    """The style comes from user_settings.json: replace values of the wrong type or
+    format with the defaults and clamp numbers, so a bad entry cannot crash the UI."""
+    s = {**DEFAULT_STYLE, **(style if isinstance(style, dict) else {})}
+    for key in _STYLE_COLOR_KEYS:
+        if not (isinstance(s.get(key), str) and _HEX_COLOR_RE.match(s[key])):
+            s[key] = DEFAULT_STYLE[key]
+    for key, (lo, hi) in _STYLE_INT_RANGES.items():
+        v = s.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            s[key] = DEFAULT_STYLE[key]
+        else:
+            s[key] = int(min(hi, max(lo, v)))
+    for key in ("original_font_family", "translation_font_family"):
+        if not (isinstance(s.get(key), str) and s[key].strip()):
+            s[key] = DEFAULT_STYLE[key]
+    return s
+
+
 class ChatMessage(QWidget):
     """Single chat message widget with original + async translation."""
 
-    _current_style = DEFAULT_STYLE
+    _current_style = dict(DEFAULT_STYLE)
     _compact_mode = False
 
     def __init__(
@@ -214,8 +255,8 @@ class ChatMessage(QWidget):
         self._asr_ms = asr_ms
         self._translate_ms = 0.0
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(8, 4, 8, 4)
-        self._layout.setSpacing(2)
+        self._layout.setContentsMargins(10, 5, 10, 5)
+        self._layout.setSpacing(1)
 
         s = self._current_style
         self._header_label = QLabel(self._build_header_html(s))
@@ -227,9 +268,7 @@ class ChatMessage(QWidget):
         self._header_label.setStyleSheet("background: transparent;")
         self._layout.addWidget(self._header_label)
 
-        self._trans_label = QLabel(
-            f'<span style="color:#999; font-style:italic;">{t("translating")}</span>'
-        )
+        self._trans_label = QLabel(self._note_html(s, t("translating")))
         self._trans_label.setFont(
             QFont(s["translation_font_family"], s["translation_font_size"])
         )
@@ -239,17 +278,30 @@ class ChatMessage(QWidget):
         self._layout.addWidget(self._trans_label)
 
     def _build_header_html(self, s):
+        """Original line: small grey text; time, language and ASR latency as faint tags."""
+        tag = f'font-size:8pt; color:{s["timestamp_color"]};'
+        lang = f'<span style="{tag}">{_escape(str(self._source_lang))}</span>'
+        orig = f'<span style="color:{s["original_color"]};">{_escape(self._original)}</span>'
         if self._compact_mode:
-            return (
-                f'<span style="color:#6cf;">[{self._source_lang}]</span> '
-                f'<span style="color:{s["original_color"]};">{_escape(self._original)}</span>'
-            )
+            return f"{lang}&nbsp;&nbsp;{orig}"
         return (
-            f'<span style="color:{s["timestamp_color"]};">[{self._timestamp}]</span> '
-            f'<span style="color:#6cf;">[{self._source_lang}]</span> '
-            f'<span style="color:{s["original_color"]};">{_escape(self._original)}</span> '
-            f'<span style="color:#8b8; font-size:9pt;">ASR {self._asr_ms:.0f}ms</span>'
+            f'<span style="{tag}">{_escape(str(self._timestamp))}</span>&nbsp;&nbsp;{lang}&nbsp;&nbsp;{orig}'
+            f'&nbsp;&nbsp;<span style="{tag}">ASR {self._asr_ms:.0f}ms</span>'
         )
+
+    def _translation_html(self, s, text: str, translate_ms=None):
+        """Translation line: larger, white, semi-bold; TL latency as a faint tag."""
+        html = f'<span style="color:{s["translation_color"]}; font-weight:600;">{_escape(text)}</span>'
+        if translate_ms is not None and not self._compact_mode:
+            html += (
+                f'&nbsp;&nbsp;<span style="font-size:8pt; font-weight:400; color:{s["timestamp_color"]};">'
+                f"TL {translate_ms:.0f}ms</span>"
+            )
+        return html
+
+    @staticmethod
+    def _note_html(s, text: str):
+        return f'<span style="color:{s["timestamp_color"]}; font-style:italic;">{_escape(text)}</span>'
 
     def update_streaming(self, partial_text: str):
         """Update translation label with partial streaming text (throttled)."""
@@ -268,10 +320,7 @@ class ChatMessage(QWidget):
         if text is None:
             return
         self._pending_streaming = None
-        s = self._current_style
-        self._trans_label.setText(
-            f'<span style="color:{s["translation_color"]};">&gt; {_escape(text)}</span>'
-        )
+        self._trans_label.setText(self._translation_html(self._current_style, text))
 
     def set_translation(self, translated: str, translate_ms: float):
         self._translated = translated or ""
@@ -282,19 +331,9 @@ class ChatMessage(QWidget):
             self._pending_streaming = None
         s = self._current_style
         if translated:
-            if self._compact_mode:
-                self._trans_label.setText(
-                    f'<span style="color:{s["translation_color"]};">&gt; {_escape(translated)}</span>'
-                )
-            else:
-                self._trans_label.setText(
-                    f'<span style="color:{s["translation_color"]};">&gt; {_escape(translated)}</span> '
-                    f'<span style="color:#db8; font-size:9pt;">TL {translate_ms:.0f}ms</span>'
-                )
+            self._trans_label.setText(self._translation_html(s, translated, translate_ms))
         else:
-            self._trans_label.setText(
-                f'<span style="color:#aaa; font-style:italic;">&gt; {t("same_language")}</span>'
-            )
+            self._trans_label.setText(self._note_html(s, t("same_language")))
 
     def apply_style(self, s: dict):
         self._header_label.setText(self._build_header_html(s))
@@ -305,15 +344,7 @@ class ChatMessage(QWidget):
             QFont(s["translation_font_family"], s["translation_font_size"])
         )
         if self._translated:
-            if self._compact_mode:
-                self._trans_label.setText(
-                    f'<span style="color:{s["translation_color"]};">&gt; {_escape(self._translated)}</span>'
-                )
-            else:
-                self._trans_label.setText(
-                    f'<span style="color:{s["translation_color"]};">&gt; {_escape(self._translated)}</span> '
-                    f'<span style="color:#db8; font-size:9pt;">TL {self._translate_ms:.0f}ms</span>'
-                )
+            self._trans_label.setText(self._translation_html(s, self._translated, self._translate_ms))
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
@@ -569,31 +600,36 @@ class _DragArea(QWidget):
             self.drag_finished.emit()
 
 
-_COMBO_CSS = """
-    QComboBox {
-        background: rgba(255,255,255,20);
-        border: 1px solid rgba(255,255,255,40);
-        border-radius: 3px;
-        color: #aaa;
-        font-size: 11px;
-        padding: 0 4px;
-    }
-    QComboBox:hover { background: rgba(255,255,255,40); color: #ddd; }
-    QComboBox::drop-down { border: none; width: 14px; }
-    QComboBox::down-arrow { image: none; border: none; }
-    QComboBox QAbstractItemView {
-        background: #2a2a3a; color: #ccc; selection-background-color: #444;
-    }
-"""
+def _set_tooltip(widget, text: str):
+    """Fluent tooltip, shown only while hovering (its window stays above the topmost overlay)."""
+    widget.setToolTip(text)
+    widget.installEventFilter(ToolTipFilter(widget, showDelay=300, position=ToolTipPosition.BOTTOM))
 
-_CHECK_CSS = (
-    "QCheckBox { color: #888; background: transparent; spacing: 3px; }"
-    "QCheckBox::indicator { width: 12px; height: 12px; }"
-)
+
+def _icon_button(icon, tip: str, toggle: bool = False, checked: bool = False):
+    b = TransparentToggleToolButton(icon) if toggle else TransparentToolButton(icon)
+    b.setFixedSize(28, 28)
+    b.setIconSize(QSize(14, 14))
+    b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    if toggle:
+        b.setChecked(checked)
+    _set_tooltip(b, tip)
+    return b
+
+
+def _label_text(key: str) -> str:
+    return t(key).rstrip(":：").strip()
+
+
+_PAUSED_ICON_COLOR = QColor("#e5b454")  # amber play icon: "paused" must stand out
+_QUIT_ICON_COLOR = QColor("#e06c6c")
 
 
 class DragHandle(QWidget):
-    """Top bar: row1=title+buttons, row2=checkboxes+combos."""
+    """Top bar: row 1 = title + icon buttons, row 2 = toggle icons + model / language combos."""
+
+    _FULL_H = 72
+    _COMPACT_H = 40
 
     settings_clicked = pyqtSignal()
     subtitle_clicked = pyqtSignal()
@@ -620,53 +656,48 @@ class DragHandle(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._mode = "full"
-        self.setFixedHeight(62)
-        self.setStyleSheet("background: rgba(60, 60, 80, 200); border-radius: 4px;")
+        self._running = False
+        self.setObjectName("overlayHeader")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedHeight(self._FULL_H)
+        self.setStyleSheet("#overlayHeader { background: rgba(255,255,255,8); border-radius: 8px; }")
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 2, 8, 2)
-        outer.setSpacing(2)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(4)
 
         # Row 1: drag title + action buttons
         row1 = QHBoxLayout()
         row1.setContentsMargins(0, 0, 0, 0)
-        row1.setSpacing(3)
+        row1.setSpacing(2)
 
         drag = _DragArea()
         drag.drag_finished.connect(self.position_changed)
-        drag.setStyleSheet("background: transparent;")
         drag_layout = QHBoxLayout(drag)
-        drag_layout.setContentsMargins(0, 0, 4, 0)
+        drag_layout.setContentsMargins(4, 0, 4, 0)
         drag_layout.setSpacing(6)
-
-        title = QLabel("\u2630 LiveTranslate")
-        title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-        title.setStyleSheet("color: #aaa; background: transparent;")
+        title = QLabel("LiveTranslate")
+        title.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        title.setStyleSheet("color: rgba(255,255,255,150); background: transparent;")
         drag_layout.addWidget(title)
         drag_layout.addStretch()
         row1.addWidget(drag, 1)
 
-        def _btn(text, tip=None):
-            b = QPushButton(text)
-            b.setFixedHeight(20)
-            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            b.setFont(QFont("Consolas", 8))
-            b.setStyleSheet(_BTN_CSS)
-            if tip:
-                b.setToolTip(tip)
-            return b
+        self._hide_btn = _icon_button(FIF.HIDE, t("ovl_tip_hide"))
+        self._hide_btn.clicked.connect(self.hide_clicked.emit)
+        row1.addWidget(self._hide_btn)
 
-        hide_btn = _btn(t("hide"))
-        hide_btn.clicked.connect(self.hide_clicked.emit)
-        row1.addWidget(hide_btn)
-
-        self._subtitle_btn = _btn(t("subtitle"))
+        # Checked while the subtitle window is shown (state is set by main via set_subtitle_checked)
+        self._subtitle_btn = _icon_button(FIF.FONT, t("ovl_tip_subtitle"), toggle=True)
         self._subtitle_btn.clicked.connect(self.subtitle_clicked.emit)
         row1.addWidget(self._subtitle_btn)
 
-        # Subtitle window options: lock position / click-through / settings
-        self._subtitle_menu_btn = _btn("\u25be", t("subwin_menu_tip"))
-        self._subtitle_menu_btn.setFixedWidth(16)
+        # Subtitle window options: lock position / click-through / shown lines / settings
+        self._subtitle_menu_btn = TransparentToolButton(FIF.CHEVRON_DOWN_MED)
+        self._subtitle_menu_btn.setFixedSize(18, 28)
+        self._subtitle_menu_btn.setIconSize(QSize(10, 10))
+        self._subtitle_menu_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        _set_tooltip(self._subtitle_menu_btn, t("subwin_menu_tip"))
         self._subtitle_menu = QMenu(self._subtitle_menu_btn)
         self._subtitle_lock_action = self._subtitle_menu.addAction(t("subwin_menu_lock"))
         self._subtitle_lock_action.setCheckable(True)
@@ -703,163 +734,105 @@ class DragHandle(QWidget):
         )
         row1.addWidget(self._subtitle_menu_btn)
 
-        self._running = False
-        self._start_stop_btn = _btn(t("paused"))
+        self._start_stop_btn = _icon_button(FIF.PLAY, t("ovl_tip_start"))
         self._start_stop_btn.clicked.connect(self._on_start_stop)
         row1.addWidget(self._start_stop_btn)
 
-        self._clear_btn = _btn(t("clear"))
+        self._clear_btn = _icon_button(FIF.BROOM, t("ovl_tip_clear"))
         self._clear_btn.clicked.connect(self.clear_clicked.emit)
         row1.addWidget(self._clear_btn)
 
-        # Mode toggle button
-        self._mode_btn = _btn(t("mode_full"))
+        self._mode_btn = _icon_button(FIF.BACK_TO_WINDOW, t("ovl_tip_compact"))
         self._mode_btn.clicked.connect(self._toggle_mode)
         row1.addWidget(self._mode_btn)
 
-        settings_btn = _btn(t("settings"))
-        settings_btn.clicked.connect(self.settings_clicked.emit)
-        row1.addWidget(settings_btn)
+        self._settings_btn = _icon_button(FIF.SETTING, t("ovl_tip_settings"))
+        self._settings_btn.clicked.connect(self.settings_clicked.emit)
+        row1.addWidget(self._settings_btn)
 
-        quit_btn = _btn(t("quit"))
-        quit_btn.setStyleSheet(
-            _BTN_CSS.replace("rgba(255,255,255,20)", "rgba(200,60,60,40)").replace(
-                "rgba(255,255,255,40)", "rgba(200,60,60,80)"
-            )
-        )
-        quit_btn.clicked.connect(self.quit_clicked.emit)
-        row1.addWidget(quit_btn)
+        self._quit_btn = _icon_button(FIF.POWER_BUTTON, t("ovl_tip_quit"))
+        self._quit_btn.setIcon(FIF.POWER_BUTTON.icon(color=_QUIT_ICON_COLOR))
+        self._quit_btn.clicked.connect(self.quit_clicked.emit)
+        row1.addWidget(self._quit_btn)
 
         outer.addLayout(row1)
 
-        # Row 2 area: checkboxes (row 2a) + model/lang combos (row 2b)
+        # Row 2: window toggles + model / source / target combos
         self._row2_widget = QWidget()
-        self._row2_widget.setStyleSheet("background: transparent;")
-        row2_outer = QVBoxLayout(self._row2_widget)
-        row2_outer.setContentsMargins(0, 0, 0, 0)
-        row2_outer.setSpacing(2)
+        row2 = QHBoxLayout(self._row2_widget)
+        row2.setContentsMargins(0, 0, 0, 0)
+        row2.setSpacing(2)
 
-        # Row 2a: checkboxes
-        row2a = QHBoxLayout()
-        row2a.setContentsMargins(0, 0, 0, 0)
-        row2a.setSpacing(6)
-
-        self._ct_check = QCheckBox(t("click_through"))
-        self._ct_check.setFont(QFont("Consolas", 8))
-        self._ct_check.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._ct_check.setStyleSheet(_CHECK_CSS)
+        # Attribute names are used by main.py to sync the tray menu (setChecked / toggled)
+        self._ct_check = _icon_button(FIF.TRANSPARENT, t("click_through"), toggle=True)
         self._ct_check.toggled.connect(self.click_through_toggled.emit)
-        row2a.addWidget(self._ct_check)
+        row2.addWidget(self._ct_check)
 
-        self._topmost_check = QCheckBox(t("top_most"))
-        self._topmost_check.setFont(QFont("Consolas", 8))
-        self._topmost_check.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._topmost_check.setStyleSheet(_CHECK_CSS)
-        self._topmost_check.setChecked(True)
+        self._topmost_check = _icon_button(FIF.PIN, t("top_most"), toggle=True, checked=True)
         self._topmost_check.toggled.connect(self.topmost_toggled.emit)
-        row2a.addWidget(self._topmost_check)
+        row2.addWidget(self._topmost_check)
 
-        self._auto_scroll = QCheckBox(t("auto_scroll"))
-        self._auto_scroll.setFont(QFont("Consolas", 8))
-        self._auto_scroll.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._auto_scroll.setStyleSheet(_CHECK_CSS)
-        self._auto_scroll.setChecked(True)
+        self._auto_scroll = _icon_button(FIF.DOWN, t("auto_scroll"), toggle=True, checked=True)
         self._auto_scroll.toggled.connect(self.auto_scroll_toggled.emit)
-        row2a.addWidget(self._auto_scroll)
+        row2.addWidget(self._auto_scroll)
 
-        self._taskbar_check = QCheckBox(t("taskbar"))
-        self._taskbar_check.setFont(QFont("Consolas", 8))
-        self._taskbar_check.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._taskbar_check.setStyleSheet(_CHECK_CSS)
-        self._taskbar_check.setChecked(False)
+        self._taskbar_check = _icon_button(FIF.TILES, t("taskbar"), toggle=True)
         self._taskbar_check.toggled.connect(self.taskbar_toggled.emit)
-        row2a.addWidget(self._taskbar_check)
+        row2.addWidget(self._taskbar_check)
 
-        row2a.addStretch()
-        row2_outer.addLayout(row2a)
+        sep = VerticalSeparator()
+        sep.setFixedHeight(18)
+        row2.addSpacing(4)
+        row2.addWidget(sep)
+        row2.addSpacing(4)
 
-        # Row 2b: model + source language + target language combos (stretch to fill)
-        row2b = QHBoxLayout()
-        row2b.setContentsMargins(0, 0, 0, 0)
-        row2b.setSpacing(4)
+        def _combo(tip: str):
+            c = ComboBox()
+            c.setFixedHeight(28)
+            c.setMinimumWidth(70)
+            c.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            _set_tooltip(c, tip)
+            return c
 
-        _lbl_css = "color: #888; background: transparent;"
-        _lbl_font = QFont("Consolas", 8)
-        _combo_font = QFont("Consolas", 8)
-
-        model_lbl = QLabel(t("model_label"))
-        model_lbl.setFont(_lbl_font)
-        model_lbl.setStyleSheet(_lbl_css)
-        row2b.addWidget(model_lbl)
-
-        self._model_combo = QComboBox()
-        self._model_combo.setFixedHeight(18)
-        self._model_combo.setFont(_combo_font)
-        self._model_combo.setStyleSheet(_COMBO_CSS)
-        self._model_combo.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
+        self._model_combo = _combo(_label_text("model_label"))
         self._model_combo.currentIndexChanged.connect(self.model_changed.emit)
-        row2b.addWidget(self._model_combo, 3)
+        row2.addWidget(self._model_combo, 3)
 
-        src_lbl = QLabel(t("source_label"))
-        src_lbl.setFont(_lbl_font)
-        src_lbl.setStyleSheet(_lbl_css)
-        row2b.addWidget(src_lbl)
-
-        self._source_lang = QComboBox()
-        self._source_lang.setFixedHeight(18)
-        self._source_lang.setFont(_combo_font)
-        self._source_lang.setStyleSheet(_COMBO_CSS)
-        self._source_lang.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
+        self._source_lang = _combo(_label_text("source_label"))
         for code, native in LANGUAGES:
             label = t("asr_lang_auto") if code == "auto" else native
-            self._source_lang.addItem(f"{code} - {label}", code)
+            self._source_lang.addItem(f"{code} - {label}", userData=code)
         self._source_lang.currentIndexChanged.connect(
             lambda idx: self.source_language_changed.emit(
                 self._source_lang.currentData() or "auto"
             )
         )
-        row2b.addWidget(self._source_lang, 2)
+        row2.addWidget(self._source_lang, 2)
 
-        tgt_lbl = QLabel(t("target_label"))
-        tgt_lbl.setFont(_lbl_font)
-        tgt_lbl.setStyleSheet(_lbl_css)
-        row2b.addWidget(tgt_lbl)
+        arrow = IconWidget(FIF.RIGHT_ARROW)
+        arrow.setFixedSize(12, 12)
+        row2.addWidget(arrow)
 
-        self._target_lang = QComboBox()
-        self._target_lang.setFixedHeight(18)
-        self._target_lang.setFont(_combo_font)
-        self._target_lang.setStyleSheet(_COMBO_CSS)
-        self._target_lang.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
+        self._target_lang = _combo(_label_text("target_label"))
         for code, native in LANGUAGES:
             if code == "auto":
                 continue
-            self._target_lang.addItem(f"{code} - {native}", code)
+            self._target_lang.addItem(f"{code} - {native}", userData=code)
         self._target_lang.currentIndexChanged.connect(
             lambda idx: self.target_language_changed.emit(
                 self._target_lang.currentData() or "zh"
             )
         )
-        row2b.addWidget(self._target_lang, 2)
-
-        row2_outer.addLayout(row2b)
+        row2.addWidget(self._target_lang, 2)
 
         outer.addWidget(self._row2_widget)
+        self.set_running(False)
 
     def _on_start_stop(self):
         if self._running:
             self.stop_clicked.emit()
         else:
             self.start_clicked.emit()
-
-    _PAUSED_CSS = _BTN_CSS.replace(
-        "rgba(255,255,255,20)", "rgba(220,180,60,50)"
-    ).replace("color: #aaa", "color: #ddb")
 
     def set_target_language(self, lang: str):
         idx = self._target_lang.findData(lang)
@@ -878,8 +851,10 @@ class DragHandle(QWidget):
     def set_models(self, models: list, active_index: int = 0):
         self._model_combo.blockSignals(True)
         self._model_combo.clear()
-        for m in models:
-            self._model_combo.addItem(m.get("name", m.get("model", "?")))
+        for m in models or []:
+            if not isinstance(m, dict):
+                continue
+            self._model_combo.addItem(str(m.get("name", m.get("model", "?"))))
         if 0 <= active_index < self._model_combo.count():
             self._model_combo.setCurrentIndex(active_index)
         self._model_combo.blockSignals(False)
@@ -891,11 +866,11 @@ class DragHandle(QWidget):
     def set_running(self, running: bool):
         self._running = running
         if running:
-            self._start_stop_btn.setText(t("running"))
-            self._start_stop_btn.setStyleSheet(_BTN_CSS)
+            self._start_stop_btn.setIcon(FIF.PAUSE)
+            self._start_stop_btn.setToolTip(t("ovl_tip_pause"))
         else:
-            self._start_stop_btn.setText(t("paused"))
-            self._start_stop_btn.setStyleSheet(self._PAUSED_CSS)
+            self._start_stop_btn.setIcon(FIF.PLAY.icon(color=_PAUSED_ICON_COLOR))
+            self._start_stop_btn.setToolTip(t("ovl_tip_start"))
 
     def _toggle_mode(self):
         new_mode = "compact" if self._mode == "full" else "full"
@@ -909,8 +884,9 @@ class DragHandle(QWidget):
         self._clear_btn.setVisible(not compact)
         self._subtitle_btn.setVisible(not compact)
         self._subtitle_menu_btn.setVisible(not compact)
-        self._mode_btn.setText(t("mode_compact") if compact else t("mode_full"))
-        self.setFixedHeight(24 if compact else 62)
+        self._mode_btn.setIcon(FIF.FULL_SCREEN if compact else FIF.BACK_TO_WINDOW)
+        self._mode_btn.setToolTip(t("ovl_tip_full") if compact else t("ovl_tip_compact"))
+        self.setFixedHeight(self._COMPACT_H if compact else self._FULL_H)
 
     def set_mode(self, mode: str):
         if mode != self._mode:
@@ -936,11 +912,40 @@ class DragHandle(QWidget):
         self._subtitle_show_prev_action.setChecked(bool(show))
 
     def set_subtitle_checked(self, checked: bool):
-        self._subtitle_btn.setStyleSheet(
-            _BTN_CSS.replace("rgba(255,255,255,20)", "rgba(80,180,80,40)").replace(
-                "rgba(255,255,255,40)", "rgba(80,180,80,80)"
-            ) if checked else _BTN_CSS
-        )
+        self._subtitle_btn.setChecked(bool(checked))
+
+
+class _StatusSection(QWidget):
+    """Collapsible "狀態" block holding the MonitorBar (MIC/RMS/VAD bars, CPU/GPU, counters).
+    Collapsed by default so the card shows only the conversation."""
+
+    def __init__(self, monitor: "MonitorBar", parent=None):
+        super().__init__(parent)
+        self._monitor = monitor
+        self._expanded = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(0)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self._toggle_btn = TransparentPushButton(FIF.CHEVRON_RIGHT_MED, t("status_section"))
+        self._toggle_btn.setFixedHeight(24)
+        self._toggle_btn.setIconSize(QSize(10, 10))
+        self._toggle_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._toggle_btn.clicked.connect(lambda: self.set_expanded(not self._expanded))
+        row.addWidget(self._toggle_btn)
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addWidget(monitor)
+        monitor.setVisible(False)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool):
+        self._expanded = bool(expanded)
+        self._monitor.setVisible(self._expanded)
+        self._toggle_btn.setIcon(FIF.CHEVRON_DOWN_MED if self._expanded else FIF.CHEVRON_RIGHT_MED)
 
 
 class SubtitleOverlay(QWidget):
@@ -985,6 +990,7 @@ class SubtitleOverlay(QWidget):
         self._pos_save_timer.setInterval(500)
         self._pos_save_timer.timeout.connect(lambda: self.position_changed.emit())
         self._last_saved_geo = None
+        self._card_radius = DEFAULT_STYLE["border_radius"]
         self._setup_ui()
 
         self.add_message_signal.connect(self._on_add_message)
@@ -1015,17 +1021,19 @@ class SubtitleOverlay(QWidget):
         self.setMinimumSize(480, 200)
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        # Room around the card for the soft shadow painted in paintEvent
+        main_layout.setContentsMargins(self._SHADOW, self._SHADOW, self._SHADOW, self._SHADOW)
         main_layout.setSpacing(0)
 
+        # The card. Its style sheet is scoped to #overlayCard so it does not cascade into
+        # the Fluent widgets inside (an unscoped "background" rule would restyle all of them).
         self._container = QWidget()
-        self._container.setStyleSheet(
-            "background-color: rgba(15, 15, 25, 200); border-radius: 8px;"
-        )
+        self._container.setObjectName("overlayCard")
+        self._container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         container_layout = QVBoxLayout(self._container)
-        container_layout.setContentsMargins(4, 4, 4, 4)
-        container_layout.setSpacing(0)
+        container_layout.setContentsMargins(6, 6, 6, 4)
+        container_layout.setSpacing(2)
 
         # Drag handle
         self._handle = DragHandle()
@@ -1051,9 +1059,10 @@ class SubtitleOverlay(QWidget):
         self._handle.position_changed.connect(self.position_changed)
         container_layout.addWidget(self._handle)
 
-        # Monitor bar (collapsible)
+        # Monitor bar inside the collapsible status section (collapsed by default)
         self._monitor = MonitorBar()
-        container_layout.addWidget(self._monitor)
+        self._status = _StatusSection(self._monitor)
+        container_layout.addWidget(self._status)
 
         # Scroll area
         self._scroll = QScrollArea()
@@ -1082,6 +1091,7 @@ class SubtitleOverlay(QWidget):
         self._msg_layout.addStretch()
 
         self._scroll.setWidget(self._msg_container)
+        self._scroll.viewport().setStyleSheet("background: transparent;")
         container_layout.addWidget(self._scroll)
 
         grip_row = QHBoxLayout()
@@ -1093,10 +1103,32 @@ class SubtitleOverlay(QWidget):
         container_layout.addLayout(grip_row)
 
         main_layout.addWidget(self._container)
+        self._apply_card_style(_sanitize_style(DEFAULT_STYLE))
 
         self._ct_timer = QTimer(self)
         self._ct_timer.timeout.connect(self._check_click_through)
         self._ct_timer.start(50)
+
+    _SHADOW = 10  # px of transparent margin around the card for the shadow
+
+    def paintEvent(self, event):
+        """Soft shadow around the card, drawn as thin rings outside it. Cheaper than a
+        QGraphicsDropShadowEffect, which would re-render the whole message list through
+        an offscreen pixmap on every streaming update."""
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        card = QRectF(self._container.geometry()).translated(0, 2)
+        r = float(self._card_radius)
+        n = self._SHADOW
+        for i in range(1, n + 1):
+            outer = QPainterPath()
+            outer.addRoundedRect(card.adjusted(-i, -i, i, i), r + i, r + i)
+            inner = QPainterPath()
+            inner.addRoundedRect(card.adjusted(-(i - 1), -(i - 1), i - 1, i - 1), r + i - 1, r + i - 1)
+            alpha = int(46 * (1 - i / (n + 1)) ** 2)
+            p.fillPath(outer.subtracted(inner), QColor(0, 0, 0, alpha))
+        p.end()
 
     def _schedule_pos_save(self):
         if not self.isVisible():
@@ -1169,7 +1201,7 @@ class SubtitleOverlay(QWidget):
 
     def _on_mode_changed(self, mode: str):
         compact = mode == "compact"
-        self._monitor.setVisible(not compact)
+        self._status.setVisible(not compact)
         ChatMessage._compact_mode = compact
         s = ChatMessage._current_style
         for msg in self._messages.values():
@@ -1267,25 +1299,34 @@ class SubtitleOverlay(QWidget):
         sb.setValue(sb.maximum())
 
     def apply_style(self, style: dict):
+        style = style if isinstance(style, dict) else {}
         s = {**DEFAULT_STYLE, **style}
         # Migrate old single font_family to split fields
         if "font_family" in s and "original_font_family" not in style:
             s["original_font_family"] = s["font_family"]
             s["translation_font_family"] = s["font_family"]
-        # Container background
-        bg_rgba = _hex_to_rgba(s["bg_color"], s["bg_opacity"])
-        self._container.setStyleSheet(
-            f"background-color: {bg_rgba}; border-radius: {s['border_radius']}px;"
-        )
-        # Header background
-        hdr_rgba = _hex_to_rgba(s["header_color"], s["header_opacity"])
-        self._handle.setStyleSheet(f"background: {hdr_rgba}; border-radius: 4px;")
+        s = _sanitize_style(s)
+        self._apply_card_style(s)
         # Window opacity
         self.setWindowOpacity(s["window_opacity"] / 100.0)
         # Update all existing messages
         ChatMessage._current_style = s
         for msg in self._messages.values():
             msg.apply_style(s)
+
+    def _apply_card_style(self, s: dict):
+        """Card + header backgrounds, scoped by object name (see _setup_ui)."""
+        self._card_radius = s["border_radius"]
+        bg_rgba = _hex_to_rgba(s["bg_color"], s["bg_opacity"])
+        self._container.setStyleSheet(
+            f"#overlayCard {{ background-color: {bg_rgba}; border-radius: {s['border_radius']}px;"
+            f" border: 1px solid rgba(255,255,255,18); }}"
+        )
+        hdr_rgba = _hex_to_rgba(s["header_color"], s["header_opacity"])
+        self._handle.setStyleSheet(
+            f"#overlayHeader {{ background: {hdr_rgba}; border-radius: {max(4, s['border_radius'] - 4)}px; }}"
+        )
+        self.update()
 
     def export_messages(self, mode: str, parent=None):
         """Export captured messages to a .txt file.
