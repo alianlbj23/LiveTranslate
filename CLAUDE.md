@@ -102,7 +102,7 @@ DragHandle is a 2-row header bar built from PyQt6-Fluent-Widgets (icon-only butt
 - The frameless window is stretched up / down with `_EdgeResizeHandle` strips along the card's top and bottom edges (native `startSystemResize`, manual fallback)
 - **Row 2**: `TransparentToggleToolButton` toggles (Click-through, Top-most, Auto-scroll, Taskbar; attribute names `_ct_check`/`_topmost_check`/`_auto_scroll`/`_taskbar_check` are used by main.py's tray sync) + Fluent `ComboBox` for model / source / target language (items carry the language code as `userData`)
 
-MonitorBar (MIC/RMS/VAD bars, ASR device, CPU/RAM/GPU, ASR/TL counts, tokens and cost) sits in `_StatusSection`, a collapsible "狀態" block that is collapsed by default and hidden in compact mode.
+MonitorBar (MIC/RMS/VAD bars, ASR device, CPU/RAM/GPU, ASR/TL counts, tokens and cost; CPU = whole machine, RAM = app process tree incl. the ASR worker, GPU = whole-card memory/load from NVIDIA NVML via ctypes in `system_stats.py`) sits in `_StatusSection`, a collapsible "狀態" block that is collapsed by default and hidden in compact mode.
 
 Style system:
 - `DEFAULT_STYLE` and `STYLE_PRESETS` defined in `subtitle_overlay.py` — 14 presets including terminal themes (Dracula, Nord, Monokai, Solarized, Gruvbox, Tokyo Night, Catppuccin, One Dark, Everforest, Kanagawa)

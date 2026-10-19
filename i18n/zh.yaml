@@ -356,6 +356,7 @@ subwin_anim_slide_down: "从上滑入"
 # Overlay header tooltips / status section
 ovl_tip_subtitle: "显示/隐藏字幕窗口"
 ovl_tip_start: "已暂停，点击开始"
+ovl_stats_tip: "CPU：整台电脑｜RAM：LiveTranslate（含语音识别子进程）｜GPU：整张显卡（已用/总显存、使用率，含 Ollama 翻译模型）"
 ovl_tip_pause: "运行中，点击暂停"
 ovl_tip_clear: "清除对话记录"
 ovl_tip_compact: "切换为精简模式"

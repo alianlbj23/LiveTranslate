@@ -357,6 +357,7 @@ subwin_anim_slide_down: "Slide Down"
 # Overlay header tooltips / status section
 ovl_tip_subtitle: "Show / hide the subtitle window"
 ovl_tip_start: "Paused - click to start"
+ovl_stats_tip: "CPU: whole computer | RAM: LiveTranslate incl. the speech-recognition worker | GPU: whole graphics card (used/total memory, load), incl. the Ollama translation model"
 ovl_tip_pause: "Running - click to pause"
 ovl_tip_clear: "Clear messages"
 ovl_tip_compact: "Switch to mini mode"

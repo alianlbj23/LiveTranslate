@@ -1,8 +1,11 @@
 import ctypes
+import logging
 import os
 import re
 
 import psutil
+
+import system_stats
 from i18n import t, LANGUAGES
 from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath
@@ -31,6 +34,8 @@ from qfluentwidgets import (
     TransparentToolButton,
     VerticalSeparator,
 )
+
+log = logging.getLogger("LiveTranslate.Overlay")
 
 _GWL_EXSTYLE = -20
 _WS_EX_TRANSPARENT = 0x20
@@ -482,10 +487,15 @@ class MonitorBar(QWidget):
         self._stats_label.setStyleSheet("color: #888; background: transparent;")
         self._stats_label.setTextFormat(Qt.TextFormat.RichText)
         self._stats_label.setWordWrap(True)
+        self._stats_label.setToolTip(t("ovl_stats_tip"))
         layout.addWidget(self._stats_label)
 
+        # The work happens outside this process (ASR worker subprocess, Ollama), so:
+        # CPU = whole machine, RAM = this process tree, GPU = whole card (system_stats)
         self._proc = psutil.Process(os.getpid())
-        self._proc.cpu_percent(interval=None)  # Prime the counter
+        system_stats.system_cpu_percent()  # prime the counter
+        self._gpu = system_stats.NvmlGpu(0)
+        self._cpu_ram_failed = False
         self._cpu = 0
         self._ram_mb = 0.0
         self._gpu_text = "N/A"
@@ -514,6 +524,9 @@ class MonitorBar(QWidget):
 
     def update_asr_device(self, device: str):
         self._asr_device = device
+        m = re.search(r"cuda:(\d+)", device or "")
+        if m and int(m.group(1)) != self._gpu.index:
+            self._gpu = system_stats.NvmlGpu(int(m.group(1)))
         self._refresh_stats()
 
     def update_pipeline_stats(
@@ -528,20 +541,14 @@ class MonitorBar(QWidget):
 
     def _update_system(self):
         try:
-            self._cpu = int(self._proc.cpu_percent(interval=None) / os.cpu_count())
-            self._ram_mb = self._proc.memory_info().rss / 1024 / 1024
-        except Exception:
-            pass
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                alloc = torch.cuda.memory_allocated() / 1024 / 1024
-                self._gpu_text = f"{alloc:.0f}MB"
-            else:
-                self._gpu_text = "N/A"
-        except Exception:
-            self._gpu_text = "N/A"
+            self._cpu = int(round(system_stats.system_cpu_percent()))
+            self._ram_mb = system_stats.process_tree_rss_mb(self._proc)
+            self._cpu_ram_failed = False
+        except psutil.Error as e:
+            if not self._cpu_ram_failed:  # once per failure streak, not every second
+                log.warning(f"CPU/RAM stats unavailable: {e}")
+            self._cpu_ram_failed = True
+        self._gpu_text = system_stats.format_gpu(self._gpu.read())
         self._refresh_stats()
 
     def _refresh_stats(self):
