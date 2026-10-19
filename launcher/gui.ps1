@@ -2,6 +2,7 @@
 # 判斷邏輯放在獨立函式（Get-LauncherCatalog / Test-OllamaModelDownloaded / Format-ModelChoice /
 # Resolve-SwitchRequest），視窗只負責顯示與回傳使用者的選擇，方便測試。
 # 用法：. (Join-Path $Root "launcher\gui.ps1")；$r = Show-LauncherWindow ...；$r.Action = start | verify | guide | switch | exit
+#       start / switch 的 $r.Model 是要換成的模型（$null = 沿用目前的模型）
 
 function Get-LauncherCatalog {
     # local_models.json 的模型清單（與 local_models.py 共用）
@@ -62,6 +63,27 @@ function Resolve-SwitchRequest {
     return "none"
 }
 
+function Resolve-SelectedModel {
+    # 依清單目前選的模型決定要不要換：回傳 @{ Proceed = $true/$false; Model = 要換成的模型或 $null }
+    # 同一個模型 → 不用換；已下載 → 直接換；沒下載 → 先問（顯示大小），不同意就把清單選回目前的模型。
+    param($Form)
+    $st = $Form.Tag
+    if ($st.Box.SelectedIndex -lt 0) { return @{ Proceed = $true; Model = $null } }
+    $e = $st.Entries[$st.Box.SelectedIndex]
+    if ($e.model -eq $st.Current) { return @{ Proceed = $true; Model = $null } }
+    $ask = $st.Confirm  # tests replace the download question with a fixed answer
+    if (-not $ask) {
+        $ask = { param($text) ([System.Windows.Forms.MessageBox]::Show($Form, $text, "下載翻譯模型",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq
+            [System.Windows.Forms.DialogResult]::Yes) }
+    }
+    $decision = Resolve-SwitchRequest -Entry $e -CurrentModel $st.Current -Downloaded $st.Downloaded[$e.model] -Confirm $ask
+    if ($decision -eq "switch") { return @{ Proceed = $true; Model = $e.model } }
+    $st.Box.SelectedIndex = $st.CurrentIndex  # -1 = current model is not in the list: nothing selected
+    $st.Hint.Text = "沒有下載「$($e.label)」，維持使用目前的模型。"
+    return @{ Proceed = $false; Model = $null }
+}
+
 function Show-LauncherError {
     # 按鈕動作出錯時：寫進黑色視窗並顯示看得懂的訊息（不讓 WinForms 跳出例外對話框）
     param($ErrorRecord)
@@ -118,7 +140,15 @@ function New-LauncherForm {
     $btnStart.Text = "▶  啟動字幕"
     $btnStart.Font = New-Object System.Drawing.Font("Microsoft JhengHei UI", 14, [System.Drawing.FontStyle]::Bold)
     $btnStart.Location = New-Object System.Drawing.Point(20, 88); $btnStart.Size = New-Object System.Drawing.Size(520, 60)
-    $btnStart.Add_Click($onAction)
+    $btnStart.Add_Click({
+        try {
+            $f = $this.FindForm()
+            $req = Resolve-SelectedModel -Form $f
+            if (-not $req.Proceed) { return }
+            $f.Tag.Result.Action = "start"; $f.Tag.Result.Model = $req.Model
+            $f.Close()
+        } catch { Show-LauncherError $_ }
+    })
     $form.Controls.Add($btnStart)
 
     $grp = New-Object System.Windows.Forms.GroupBox
@@ -134,19 +164,19 @@ function New-LauncherForm {
 
     $entries = @($Catalog)
     $downloaded = @{}
-    $selectIndex = 0
+    $currentIndex = -1  # stays -1 for a model outside the catalog: nothing preselected, Enter keeps it
     for ($i = 0; $i -lt $entries.Count; $i++) {
         $e = $entries[$i]
         $downloaded[$e.model] = (Test-OllamaModelDownloaded -Model $e.model -ModelsDir $ModelsDir)
         [void]$box.Items.Add((Format-ModelChoice -Entry $e -Downloaded $downloaded[$e.model] -Current ($e.model -eq $CurrentModel)))
-        if ($e.model -eq $CurrentModel) { $selectIndex = $i }
+        if ($e.model -eq $CurrentModel) { $currentIndex = $i }
     }
-    if ($box.Items.Count -gt 0) { $box.SelectedIndex = $selectIndex }
+    $box.SelectedIndex = $currentIndex
 
     $hint = New-Object System.Windows.Forms.Label
     $hint.Location = New-Object System.Drawing.Point(14, 66); $hint.Size = New-Object System.Drawing.Size(496, 46)
     $hint.ForeColor = [System.Drawing.Color]::DimGray
-    $hint.Text = "選好後按「切換」，下次啟動就會使用；字幕執行中也可以在對話記錄視窗的模型選單直接切換。"
+    $hint.Text = "選好後直接按「▶ 啟動字幕」就會用這個模型（沒下載的會先問）；只想先下載／切換可按「切換」。"
     $grp.Controls.Add($hint)
 
     $btnSwitch = New-Object System.Windows.Forms.Button
@@ -159,17 +189,10 @@ function New-LauncherForm {
             $st = $f.Tag
             if ($st.Box.SelectedIndex -lt 0) { return }
             $e = $st.Entries[$st.Box.SelectedIndex]
-            $ask = $st.Confirm  # tests replace the download question with a fixed answer
-            if (-not $ask) {
-                $ask = { param($text) ([System.Windows.Forms.MessageBox]::Show($f, $text, "下載翻譯模型",
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq
-                    [System.Windows.Forms.DialogResult]::Yes) }
-            }
-            $decision = Resolve-SwitchRequest -Entry $e -CurrentModel $st.Current -Downloaded $st.Downloaded[$e.model] -Confirm $ask
-            if ($decision -eq "switch") {
-                $st.Result.Action = "switch"; $st.Result.Model = $e.model; $f.Close()
-            } elseif ($e.model -eq $st.Current) {
-                $st.Hint.Text = "目前已經在使用「$($e.label)」。"
+            if ($e.model -eq $st.Current) { $st.Hint.Text = "目前已經在使用「$($e.label)」。"; return }
+            $req = Resolve-SelectedModel -Form $f
+            if ($req.Proceed -and $req.Model) {
+                $st.Result.Action = "switch"; $st.Result.Model = $req.Model; $f.Close()
             }
         } catch { Show-LauncherError $_ }
     })
@@ -191,7 +214,7 @@ function New-LauncherForm {
     $foot.Location = New-Object System.Drawing.Point(22, 344); $foot.AutoSize = $true
     $form.Controls.Add($foot)
 
-    $form.Tag = @{ Result = $result; Box = $box; Entries = $entries; Downloaded = $downloaded; Current = $CurrentModel; Hint = $hint; Confirm = $null }
+    $form.Tag = @{ Result = $result; Box = $box; Entries = $entries; Downloaded = $downloaded; Current = $CurrentModel; CurrentIndex = $currentIndex; Hint = $hint; Confirm = $null }
     $form.AcceptButton = $btnStart            # Enter = 啟動
     $form.CancelButton = $buttons["btnExit"]  # Esc = 離開
     $form.Add_Shown({ $this.AcceptButton.Focus() })

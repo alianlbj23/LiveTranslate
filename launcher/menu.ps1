@@ -27,10 +27,12 @@ function Get-ActivePort {
 }
 
 function Switch-Model {
+    # 下載（需要時）並切換翻譯模型；成功回傳 $true。外部程式的輸出一律送到畫面（Out-Host），不混進回傳值。
     param([string]$Model)
     $port = Get-ActivePort
     $alive = $false
-    try { Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/version" -TimeoutSec 2 | Out-Null; $alive = $true } catch {}
+    try { Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/version" -TimeoutSec 2 | Out-Null; $alive = $true }
+    catch { $alive = $false }  # expected when Ollama is not running yet: start it below
     if (-not $alive) {
         Write-Host "Ollama 沒有在執行，先啟動 Windows 版 Ollama..." -ForegroundColor Yellow
         $env:OLLAMA_HOST = "127.0.0.1:$port"; $env:OLLAMA_KEEP_ALIVE = "30m"; $env:OLLAMA_FLASH_ATTENTION = "1"; $env:OLLAMA_KV_CACHE_TYPE = "q8_0"; $env:OLLAMA_NUM_PARALLEL = "2"; $env:OLLAMA_CONTEXT_LENGTH = "2048"; $env:OLLAMA_MAX_LOADED_MODELS = "1"
@@ -38,15 +40,22 @@ function Switch-Model {
         Start-Sleep -Seconds 5
     }
     $env:OLLAMA_HOST = "127.0.0.1:$port"
-    Write-Host "下載 / 確認模型 $Model ..." -ForegroundColor Cyan
-    & $Ollama pull $Model
-    if ($LASTEXITCODE -ne 0) { Write-Host "下載失敗。" -ForegroundColor Red; return }
+    if (Test-OllamaModelDownloaded -Model $Model) {
+        # already on disk: no registry round trip, so switching also works offline
+        Write-Host "模型 $Model 已下載。" -ForegroundColor Cyan
+    } else {
+        Write-Host "下載模型 $Model ..." -ForegroundColor Cyan
+        & $Ollama pull $Model | Out-Host
+        if ($LASTEXITCODE -ne 0) { Write-Host "下載失敗（exit code $LASTEXITCODE）。" -ForegroundColor Red; return $false }
+    }
     if (Test-Path $Settings) {
-        & $Python -I $Helper $Settings "http://127.0.0.1:$port/v1" $Model
+        & $Python -I $Helper $Settings "http://127.0.0.1:$port/v1" $Model | Out-Host
+        if ($LASTEXITCODE -ne 0) { Write-Host "更新設定檔失敗（exit code $LASTEXITCODE），沒有切換。" -ForegroundColor Red; return $false }
     }
     # 讓啟動腳本之後也用這個模型（存在 git 不追蹤的 selected_model.txt，不改腳本本身）
-    if (-not (Set-LauncherModel -Path $ModelFile -Model $Model)) { return }
+    if (-not (Set-LauncherModel -Path $ModelFile -Model $Model)) { return $false }
     Write-Host "已切換為 $Model（LiveTranslate 重新啟動後生效）。" -ForegroundColor Green
+    return $true
 }
 
 function Show-TextMenu {
@@ -113,10 +122,15 @@ while ($true) {
     }
     if ($useText) { $r = Show-TextMenu }
     switch ($r.Action) {
-        "start"  { & $StartScript }
+        "start"  {
+            # 視窗裡選了別的模型：先換（必要時下載），換不成功就不啟動，免得默默沿用舊模型
+            $ok = $true
+            if ($r.Model) { $ok = Switch-Model $r.Model }
+            if ($ok) { & $StartScript } else { [void](Read-Host "模型沒有切換成功，按 Enter 回到選單") }
+        }
         "verify" { & $VerifyScript; [void](Read-Host "按 Enter 回到選單") }
         "guide"  { Start-Process $GuideFile }
-        "switch" { Switch-Model $r.Model; [void](Read-Host "按 Enter 回到選單") }
+        "switch" { [void](Switch-Model $r.Model); [void](Read-Host "按 Enter 回到選單") }
         "none"   { }
         default  { exit 0 }
     }

@@ -321,7 +321,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 5. **關閉**：字幕視窗右上角 **結束**，或右下角系統匣的 LiveTranslate 圖示 → 結束。關閉黑色視窗也會一起結束。
    結束時程式會自動卸載翻譯模型並關閉啟動腳本開的 Ollama，顯示記憶體會全部釋放（黑色視窗會顯示「已卸載」「Ollama 服務已關閉」）。直接叉掉黑色視窗也可以：隱藏的看門狗會在幾秒內完成同樣的釋放。
 6. **切換語音辨識模型**：Settings → VAD / ASR → 引擎 改成 Anime-Whisper（或 Whisper 模型下拉改 large-v3 / medium）。切換會自動重載，不用重啟。
-7. **切換翻譯模型**：啟動視窗的「翻譯模型」選好後按「切換」（Qwen3.5 9B / 4B、Sakura GalTransl 7B；沒下載的會先確認大小）；字幕執行中也可以在對話記錄視窗的模型選單直接切換，Ollama 只保留一個模型在顯示卡上（`OLLAMA_MAX_LOADED_MODELS=1`）。選擇存在 `launcher\selected_model.txt`（git 不追蹤，選單會顯示目前模型）；不會改動任何腳本，所以不影響自動更新。檔案內容無效時會提示並改用預設 qwen3.5:9b。
+7. **切換翻譯模型**：啟動視窗的「翻譯模型」選好後直接按「▶ 啟動字幕」，會先換成該模型再啟動（Qwen3.5 9B / 4B、Sakura GalTransl 7B；沒下載的會先確認大小，下載失敗就不啟動）；只想先下載／切換、不啟動可按「切換」；字幕執行中也可以在對話記錄視窗的模型選單直接切換，Ollama 只保留一個模型在顯示卡上（`OLLAMA_MAX_LOADED_MODELS=1`）。選擇存在 `launcher\selected_model.txt`（git 不追蹤，選單會顯示目前模型）；不會改動任何腳本，所以不影響自動更新。檔案內容無效時會提示並改用預設 qwen3.5:9b。
 8. **更新**：每次雙擊 `LiveTranslate.bat` 都會自動檢查 GitHub 上的新版本並更新（`launcher\update.ps1`）；離線、或本機有未提交的修改時會略過，不會擋啟動。套件清單有變才會重裝套件。
 9. 每次執行會在 `D:\workspace\language_translate\transcripts\` 留下原文 / 翻譯逐字稿（可在 Settings → 逐字稿儲存 關閉）。
 10. **兩種字幕視窗的操作方式**
