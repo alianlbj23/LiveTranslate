@@ -1559,7 +1559,8 @@ class LiveTranslateApp:
         self._live_dirty = True
         log.debug(f"Live preview: {text}")
         if self._subwin and self._subwin.isVisible():
-            self._subwin.update_live(text)  # keep the current translation until the new one streams in
+            # Keep the current translation until the new one streams in
+            self._subwin.update_live(text, seq=self._live_seq)
         self._start_live_worker()
 
     def _start_live_worker(self):
@@ -1590,15 +1591,15 @@ class LiveTranslateApp:
                             break
                         out = partial
                         if self._subwin and self._subwin.isVisible():
-                            self._subwin.update_live(text, partial, final=False)
+                            self._subwin.update_live(text, partial, complete=False, seq=seq)
                     if stale:
                         continue
                     log.info(f"Live translate ({(time.perf_counter() - t0) * 1000:.0f}ms): {out}")
                 except Exception as e:
                     log.debug(f"Live preview translate error: {e}")
-                    return
+                    break  # fall through to the restart check below
                 if seq == self._live_seq and out and self._subwin and self._subwin.isVisible():
-                    self._subwin.update_live(text, out, final=True)
+                    self._subwin.update_live(text, out, complete=True, seq=seq)
                 # If newer text arrived meanwhile, _live_dirty is True and we loop
         finally:
             self._live_inflight = False
@@ -1646,6 +1647,11 @@ class LiveTranslateApp:
     def _process_segment_text(self, text: str, source_lang: str, asr_ms: float = 0):
         """Output a text result (from interim or final) — similar to _process_segment but skips ASR."""
         original_text = text.strip()
+        # A sentence is being finalized: invalidate in-flight preview updates so a late
+        # partial cannot re-show it as live; the next interim pass re-emits what is still spoken
+        self._live_seq += 1
+        self._live_last_text = ""
+        self._live_dirty = False
         if not original_text or not any(c.isalnum() for c in original_text):
             return
 

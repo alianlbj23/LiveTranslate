@@ -532,7 +532,7 @@ class SubtitleWindow(QWidget):
     # Emitted when the user double-clicks to lock the window (main syncs tray/settings)
     click_through_requested = pyqtSignal(bool)
     # Live preview of the sentence being spoken: (original, provisional translation, flags)
-    live_signal = pyqtSignal(str, str, int)
+    live_signal = pyqtSignal(str, str, int, int)
 
     _EDGE = 12       # px zone on the right edge used for width resizing
     _CORNER = 18     # px zone at the bottom-right corner
@@ -570,7 +570,8 @@ class SubtitleWindow(QWidget):
         self._live_timer = QTimer(self)
         self._live_timer.setSingleShot(True)
         self._live_timer.setInterval(4000)  # stale preview safety clear
-        self._live_timer.timeout.connect(lambda: self._on_live("", "", 0))
+        self._live_seq_shown = 0
+        self._live_timer.timeout.connect(lambda: self._on_live("", "", 0, 0))
 
         self._setup_ui()
         self.update_text_signal.connect(self._on_update_text)
@@ -972,43 +973,53 @@ class SubtitleWindow(QWidget):
         self.update_text_signal.emit(original, json.dumps(translations, ensure_ascii=False))
 
     # live_signal flags
-    _LIVE_HAS_TL = 1   # translation argument carries a value
-    _LIVE_FINAL = 2    # translation is the complete provisional result (end of stream)
+    _LIVE_HAS_TL = 1     # translation argument carries a value
+    _LIVE_COMPLETE = 2   # translation is the complete provisional result (end of stream)
 
-    def update_live(self, original: str, translation=None, final: bool = True):
+    def update_live(self, original: str, translation=None, complete: bool = False, seq: int = 0):
         """Thread-safe: show/update the sentence still being spoken.
 
         translation=None keeps whatever translation is currently shown (no "..." blink);
-        final=False marks a streaming partial, which only replaces the shown text
+        complete=False marks a streaming partial, which only replaces the shown text
         when it is at least as long (text grows like YouTube captions, never shrinks).
+        seq identifies the preview generation; updates older than the shown one are dropped.
         """
         flags = 0
         if translation is not None:
             flags |= self._LIVE_HAS_TL
-        if final:
-            flags |= self._LIVE_FINAL
-        self.live_signal.emit(original or "", translation or "", flags)
+        if complete:
+            flags |= self._LIVE_COMPLETE
+        self.live_signal.emit(original or "", translation or "", flags, int(seq))
 
     def clear_live(self):
-        self.live_signal.emit("", "", 0)
+        self.live_signal.emit("", "", 0, 0)
 
-    @pyqtSlot(str, str, int)
-    def _on_live(self, original: str, translation: str, flags: int):
+    @pyqtSlot(str, str, int, int)
+    def _on_live(self, original: str, translation: str, flags: int, seq: int):
         if not original:
             if self._live is None:
                 return
             self._live = None
+            self._live_seq_shown = 0
             self._live_timer.stop()
             self._refresh_display()
             return
 
+        if seq and self._live is not None and seq < self._live_seq_shown:
+            return  # stale update from an earlier preview generation
+        if seq:
+            self._live_seq_shown = seq
+
         cur_o, cur_t = self._live if self._live is not None else ("", "")
         new_o, new_t = cur_o, cur_t
+        ignore_translation = False
 
         if original != cur_o:
             if cur_o and cur_o.startswith(original):
-                # ASR momentarily produced a shorter prefix: keep the longer text (no flicker)
+                # ASR momentarily produced a shorter prefix: keep the longer text, and
+                # its translation would describe the shorter text, so ignore it
                 new_o = cur_o
+                ignore_translation = True
             elif cur_o and (original.startswith(cur_o) or original.startswith(cur_o[:max(4, len(cur_o) // 2)])):
                 # Same sentence growing / being refined: keep the shown translation for now
                 new_o = original
@@ -1017,8 +1028,8 @@ class SubtitleWindow(QWidget):
                 new_o = original
                 new_t = ""
 
-        if flags & self._LIVE_HAS_TL:
-            if flags & self._LIVE_FINAL or len(translation) >= len(new_t):
+        if flags & self._LIVE_HAS_TL and not ignore_translation:
+            if flags & self._LIVE_COMPLETE or len(translation) >= len(new_t):
                 new_t = translation
 
         if (new_o, new_t) == (cur_o, cur_t) and self._live is not None:
@@ -1082,8 +1093,14 @@ class SubtitleWindow(QWidget):
         # The final version of the previewed sentence replaces the preview
         if self._live is not None:
             lo = self._live[0]
-            if lo and original and (lo in original or original in lo or lo[-8:] in original):
+            same = bool(lo and original) and (
+                lo == original
+                or (len(lo) >= 4 and (original.startswith(lo) or lo.startswith(original)))
+                or (len(lo) >= 12 and lo[-8:] in original)
+            )
+            if same:
                 self._live = None
+                self._live_seq_shown = 0
                 self._live_timer.stop()
 
         if self._is_hidden_by_timeout:
@@ -1155,6 +1172,7 @@ class SubtitleWindow(QWidget):
     def clear(self):
         self._sentences.clear()
         self._live = None
+        self._live_seq_shown = 0
         self._live_timer.stop()
         self._cancel_pending_segments()
         self._auto_hide_timer.stop()
