@@ -12,6 +12,7 @@ $Ollama   = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 $Model    = "qwen3.5:9b"
 $Settings = Join-Path $Root "user_settings.json"
 $Helper   = Join-Path $Root "launcher\set_api_base.py"
+$UpdateScript = Join-Path $Root "launcher\update.ps1"
 $PidFile  = Join-Path $Root "launcher\ollama.pid"
 
 function Write-Info { param($m) Write-Host "[資訊] $m" -ForegroundColor Cyan }
@@ -91,6 +92,9 @@ if (-not (Test-Path $Python)) {
     Read-Host "按 Enter 關閉"
     exit 1
 }
+
+# ---- Step 0: 自動更新（離線或本機有修改時略過，永不擋啟動） ----
+if (Test-Path $UpdateScript) { & $UpdateScript }
 
 # ---- Step 1: Ollama ----
 $Port = 11434

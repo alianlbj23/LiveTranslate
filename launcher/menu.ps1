@@ -47,12 +47,6 @@ function Switch-Model {
     Write-Host "已切換為 $Model（LiveTranslate 重新啟動後生效）。" -ForegroundColor Green
 }
 
-function Stop-Ollama {
-    Get-Process -Name "ollama", "ollama app" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Remove-Item (Join-Path $Root "launcher\ollama.pid") -Force -ErrorAction SilentlyContinue
-    Write-Host "已停止 Windows 版 Ollama，顯示記憶體已釋放。" -ForegroundColor Green
-}
-
 function Wait-ForKey {
     # 等 $Seconds 秒；有按鍵就回傳該字元，逾時回傳 $null。主控台不支援時改用 Read-Host。
     param([int]$Seconds)
@@ -78,9 +72,7 @@ function Invoke-Choice {
         "2" { & $VerifyScript }
         "3" { Switch-Model "qwen3.5:4b" }
         "4" { Switch-Model "qwen3.5:9b" }
-        "5" { Push-Location $Root; cmd /c update.bat; Pop-Location }
-        "6" { Stop-Ollama }
-        "7" { Start-Process (Join-Path $Root "INSTALL_GUIDE.md") }
+        "5" { Start-Process (Join-Path $Root "INSTALL_GUIDE.md") }
         "0" { exit 0 }
         ""  { & $StartScript }
         default { Write-Host "無效的選項：$Choice" -ForegroundColor Yellow }
@@ -108,9 +100,8 @@ while ($true) {
     Write-Host " 2) 檢查 GPU / Ollama / 翻譯是否正常"
     Write-Host " 3) 切換翻譯模型為 qwen3.5:4b（顯示記憶體不足時用）"
     Write-Host " 4) 切換翻譯模型為 qwen3.5:9b（預設，品質較好）"
-    Write-Host " 5) 更新 LiveTranslate（git pull + 更新套件）"
-    Write-Host " 6) 停止 Ollama（釋放顯示記憶體，玩遊戲前一定要按）"
-    Write-Host " 7) 開啟安裝說明 INSTALL_GUIDE.md"
+    Write-Host " 5) 開啟安裝說明 INSTALL_GUIDE.md"
+    Write-Host "    （每次啟動會自動檢查更新；按「結束」關閉程式就會釋放顯示卡）" -ForegroundColor DarkGray
     Write-Host " 0) 離開"
     if ($first -and $AutoStartSeconds -gt 0) {
         Write-Host " $AutoStartSeconds 秒內沒按鍵就自動啟動雙字幕；要用其他功能請按數字。" -ForegroundColor DarkGray
