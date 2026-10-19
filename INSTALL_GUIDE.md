@@ -171,6 +171,7 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | `D:\workspace\language_translate\LiveTranslate.bat` | **唯一入口**：點兩下出現選單，直接按 Enter 啟動雙字幕；輸入數字進其他功能 |
 | `D:\workspace\language_translate\launcher\start_jp_subtitles.ps1` | 啟動邏輯：檢查/啟動 Ollama → 確認模型 → 校正 API 埠 → 啟動 LiveTranslate |
 | `launcher\menu.ps1` | 選單邏輯（Enter = 1 啟動）：2 檢查環境、3/4 切換模型、5 開本文件；也可 `-Action start|verify|setup` 直接執行 |
+| `launcher\model.ps1` | 讀寫 `launcher\selected_model.txt`（目前選用的翻譯模型）並驗證名稱；啟動、檢查、選單共用 |
 | `launcher\update.ps1` | 每次啟動的自動更新檢查（git fetch/pull --ff-only，requirements 變了才重裝套件） |
 | `launchererify.ps1` | 驗證 GPU / Whisper CUDA / Ollama / 翻譯（選單的 2） |
 | `launcher\set_api_base.py`、`write_settings.py`、`download_whisper_turbo.py` | 上面腳本用的小工具 |
@@ -318,7 +319,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 5. **關閉**：字幕視窗右上角 **結束**，或右下角系統匣的 LiveTranslate 圖示 → 結束。關閉黑色視窗也會一起結束。
    結束時程式會自動卸載翻譯模型並關閉啟動腳本開的 Ollama，顯示記憶體會全部釋放（黑色視窗會顯示「已卸載」「Ollama 服務已關閉」）。直接叉掉黑色視窗也可以：隱藏的看門狗會在幾秒內完成同樣的釋放。
 6. **切換語音辨識模型**：Settings → VAD / ASR → 引擎 改成 Anime-Whisper（或 Whisper 模型下拉改 large-v3 / medium）。切換會自動重載，不用重啟。
-7. **切換翻譯模型**：`LiveTranslate.bat` → 3（qwen3.5:4b，顯示記憶體不足時）或 4（qwen3.5:9b）。
+7. **切換翻譯模型**：`LiveTranslate.bat` → 3（qwen3.5:4b，顯示記憶體不足時）或 4（qwen3.5:9b）。選擇存在 `launcher\selected_model.txt`（git 不追蹤，選單會顯示目前模型）；不會改動任何腳本，所以不影響自動更新。檔案內容無效時會提示並改用預設 qwen3.5:9b。
 8. **更新**：每次雙擊 `LiveTranslate.bat` 都會自動檢查 GitHub 上的新版本並更新（`launcher\update.ps1`）；離線、或本機有未提交的修改時會略過，不會擋啟動。套件清單有變才會重裝套件。
 9. 每次執行會在 `D:\workspace\language_translate\transcripts\` 留下原文 / 翻譯逐字稿（可在 Settings → 逐字稿儲存 關閉）。
 10. **兩種字幕視窗的操作方式**

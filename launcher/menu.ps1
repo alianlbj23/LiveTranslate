@@ -15,6 +15,8 @@ $StartScript  = Join-Path $Root "launcher\start_jp_subtitles.ps1"
 $VerifyScript = Join-Path $Root "launcher\verify.ps1"
 $SetupScript  = Join-Path $Root "launcher\setup.ps1"
 $ReadyMarker  = Join-Path $Root ".venv\.livetranslate-ready"
+$ModelFile    = Join-Path $Root "launcher\selected_model.txt"
+. (Join-Path $Root "launcher\model.ps1")
 
 function Get-ActivePort {
     if (Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue) { return 11435 }
@@ -39,10 +41,8 @@ function Switch-Model {
     if (Test-Path $Settings) {
         & $Python -I $Helper $Settings "http://127.0.0.1:$port/v1" $Model
     }
-    # 讓啟動腳本之後也用這個模型
-    $txt = [IO.File]::ReadAllText($StartScript, [Text.Encoding]::UTF8)
-    $txt = $txt -replace '\$Model\s*=\s*"qwen3\.5:\d+b"', ('$Model    = "' + $Model + '"')
-    [IO.File]::WriteAllText($StartScript, $txt, (New-Object Text.UTF8Encoding $true))
+    # 讓啟動腳本之後也用這個模型（存在 git 不追蹤的 selected_model.txt，不改腳本本身）
+    if (-not (Set-LauncherModel -Path $ModelFile -Model $Model)) { return }
     Write-Host "已切換為 $Model（LiveTranslate 重新啟動後生效）。" -ForegroundColor Green
 }
 
@@ -83,6 +83,7 @@ while ($true) {
     Write-Host " 5) 開啟安裝說明 INSTALL_GUIDE.md"
     Write-Host "    （每次啟動會自動檢查更新；按「結束」關閉程式就會釋放顯示卡）" -ForegroundColor DarkGray
     Write-Host " 0) 離開"
+    Write-Host "    目前翻譯模型：$(Get-LauncherModel -Path $ModelFile)" -ForegroundColor DarkGray
     $choice = Read-Host "請輸入數字（直接按 Enter = 啟動）"
     Invoke-Choice $choice
 }

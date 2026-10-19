@@ -9,7 +9,9 @@ $ErrorActionPreference = "Continue"
 $Root     = Split-Path -Parent $PSScriptRoot   # launcher\ 的上一層，搬資料夾也不用改
 $Python   = Join-Path $Root ".venv\Scripts\python.exe"
 $Ollama   = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
-$Model    = "qwen3.5:9b"
+$ModelFile = Join-Path $Root "launcher\selected_model.txt"   # 選單切換的模型，git 不追蹤
+. (Join-Path $Root "launcher\model.ps1")
+$Model    = Get-LauncherModel -Path $ModelFile
 $Settings = Join-Path $Root "user_settings.json"
 $Helper   = Join-Path $Root "launcher\set_api_base.py"
 $UpdateScript = Join-Path $Root "launcher\update.ps1"

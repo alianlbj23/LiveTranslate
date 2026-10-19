@@ -31,3 +31,5 @@ release/
 
 # launcher runtime state
 launcher/ollama.pid
+launcher/selected_model.txt
+launcher/selected_model.txt.tmp
