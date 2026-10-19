@@ -7,6 +7,7 @@ import sys
 import signal
 import logging
 import threading
+import traceback
 import queue
 import gc
 from concurrent.futures import ThreadPoolExecutor
@@ -57,7 +58,7 @@ from PyQt6.QtGui import (
     QFont,
     QFontDatabase,
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal, pyqtSlot
 
 from subtitle_overlay import SubtitleOverlay
 from subtitle_window import SubtitleWindow
@@ -155,6 +156,27 @@ def load_config():
         return yaml.safe_load(f)
 
 
+class _TrayNotifier(QObject):
+    """Worker threads call notify(); the balloon is shown on the GUI thread.
+
+    QSystemTrayIcon.showMessage is a GUI call and must never run on the ASR or
+    translation threads, so the text travels through a queued signal."""
+
+    message = pyqtSignal(str, str)
+
+    def __init__(self, tray, parent=None):
+        super().__init__(parent)
+        self._tray = tray
+        self.message.connect(self._show)
+
+    def notify(self, title: str, text: str):
+        self.message.emit(str(title), str(text))
+
+    @pyqtSlot(str, str)
+    def _show(self, title: str, text: str):
+        self._tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Warning, 10000)
+
+
 class LiveTranslateApp:
     def __init__(self, config):
         self._config = config
@@ -232,6 +254,7 @@ class LiveTranslateApp:
         # Translation backlog guard: when requests pile up the LLM is crawling
         # (usually VRAM pressure); warn the user instead of silently queueing
         self._tl_inflight = 0
+        self._abandoned_threads = False
         self._tl_backlog_threshold = 6
         self._tl_backlog_last_warn = 0.0
         self._tl_backlog_callback = None
@@ -1133,11 +1156,52 @@ class LiveTranslateApp:
             f"Translation backlog: {n} requests in flight; the LLM is answering slowly "
             "(GPU memory pressure? other apps using the GPU?)"
         )
+        self._dump_worker_threads("translation backlog")
         if self._tl_backlog_callback:
             try:
                 self._tl_backlog_callback(n)
             except Exception:
                 log.warning("translation backlog callback failed", exc_info=True)
+
+    def _dump_worker_threads(self, reason: str):
+        """Log the current stack of every non-main thread.
+
+        When translations pile up without errors or timeouts the only way to find
+        where the worker threads are blocked is their stack; this costs nothing
+        unless the backlog warning already fired."""
+        try:
+            frames = sys._current_frames()
+            lines = [f"Thread dump ({reason}):"]
+            for th in threading.enumerate():
+                if th is threading.main_thread():
+                    continue
+                frame = frames.get(th.ident)
+                if frame is None:
+                    continue
+                stack = "".join(traceback.format_stack(frame, limit=12)).rstrip()
+                lines.append(f"--- {th.name} (ident={th.ident}, daemon={th.daemon}) ---\n{stack}")
+            log.warning("\n".join(lines))
+        except Exception:
+            log.warning("thread dump failed", exc_info=True)
+
+    def _shutdown_executor(self, executor, label: str, timeout: float):
+        """Stop an executor without letting a stuck worker hang the GUI thread.
+
+        Queued tasks are cancelled, running ones get `timeout` seconds; whatever is
+        still running is abandoned (stack logged) so quitting always finishes and the
+        launcher can release the GPU. main() then force-exits the process because
+        abandoned (non-daemon) executor threads would block the interpreter exit."""
+        executor.shutdown(wait=False, cancel_futures=True)
+        threads = list(getattr(executor, "_threads", ()))
+        deadline = time.monotonic() + timeout
+        for th in threads:
+            th.join(timeout=max(0.0, deadline - time.monotonic()))
+        stuck = [th.name for th in threads if th.is_alive()]
+        if stuck:
+            log.warning(f"{label} executor: {len(stuck)} worker(s) still running after {timeout:.0f}s, abandoning: {stuck}")
+            self._dump_worker_threads(f"{label} executor shutdown")
+            self._abandoned_threads = True
+        return not stuck
 
     def _translate_async(self, msg_id, text, source_lang, extra_langs=None):
         """Translate text and update UI with streaming display."""
@@ -1284,9 +1348,9 @@ class LiveTranslateApp:
         self._last_interim_samples = 0
         self._last_interim_check_time = 0.0
         self._interim_committed_tail = ""
-        self._tl_executor.shutdown(wait=True)
+        self._shutdown_executor(self._tl_executor, "translation", timeout=5.0)
         self._clear_live_preview()
-        self._live_executor.shutdown(wait=True)
+        self._shutdown_executor(self._live_executor, "live preview", timeout=5.0)
         self._transcript.close()
         if self._mem_periodic_timer is not None:
             try:
@@ -2580,23 +2644,16 @@ def main():
     tray.setContextMenu(menu)
     tray.show()
 
+    # Both callbacks run on worker threads: hand the balloon to the GUI thread.
+    notifier = _TrayNotifier(tray, parent=app)
+
     def _on_memory_warning(rss_mb: float):
-        tray.showMessage(
-            "LiveTranslate",
-            t("mem_warning_msg").format(rss=int(rss_mb)),
-            QSystemTrayIcon.MessageIcon.Warning,
-            10000,
-        )
+        notifier.notify("LiveTranslate", t("mem_warning_msg").format(rss=int(rss_mb)))
 
     live_trans.set_memory_warning_callback(_on_memory_warning)
 
     def _on_translation_backlog(n: int):
-        tray.showMessage(
-            "LiveTranslate",
-            t("tl_backlog_msg").format(n=int(n)),
-            QSystemTrayIcon.MessageIcon.Warning,
-            10000,
-        )
+        notifier.notify("LiveTranslate", t("tl_backlog_msg").format(n=int(n)))
 
     live_trans.set_translation_backlog_callback(_on_translation_backlog)
 
@@ -2607,7 +2664,14 @@ def main():
     timer.timeout.connect(lambda: None)
     timer.start(200)
 
-    sys.exit(app.exec())
+    code = app.exec()
+    if getattr(live_trans, "_abandoned_threads", False):
+        # concurrent.futures joins its (non-daemon) workers at interpreter exit;
+        # a stuck one would keep the process, and the GPU, alive forever.
+        log.warning("worker threads were abandoned; forcing process exit so the GPU is released")
+        logging.shutdown()
+        os._exit(code)
+    sys.exit(code)
 
 
 if __name__ == "__main__":
