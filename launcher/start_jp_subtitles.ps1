@@ -179,7 +179,8 @@ if (Test-Path $WatchdogScript) {
 Write-Info "啟動 LiveTranslate（第一次載入語音模型約需 5-10 秒）..."
 Write-Info "關閉方式：右下角系統匣圖示 -> 結束，或字幕視窗右上角「結束」。"
 Set-Location $Root
-$app = Start-Process -FilePath $Python -ArgumentList "main.py" -WorkingDirectory $Root -NoNewWindow -PassThru
+. (Join-Path $Root "launcher\process.ps1")
+$app = Start-TrackedProcess -FilePath $Python -ArgumentList "main.py" -WorkingDirectory $Root
 
 # 暖機：載入模型並真的跑一次翻譯，確保第一句不會等待模型載入而逾時
 Write-Info "翻譯模型暖機中..."
@@ -194,8 +195,7 @@ try {
     Write-Warn "暖機失敗：$($_.Exception.Message)（程式仍會啟動，第一句翻譯可能較慢）"
 }
 
-$app.WaitForExit()
-$code = $app.ExitCode
+$code = Wait-TrackedProcess -Process $app
 
 # ---- Step 5: release the GPU ----
 Write-Info "釋放顯示記憶體：卸載翻譯模型並關閉本腳本啟動的 Ollama..."
@@ -215,7 +215,9 @@ if (Test-Path $PidFile) {
     } catch {}
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 }
-if ($code -ne 0) {
+if ($null -eq $code) {
+    Write-Warn "讀不到 LiveTranslate 的結束代碼；顯示卡已照常釋放。"
+} elseif ($code -ne 0) {
     Write-Err "LiveTranslate 異常結束（exit code $code）。"
     Read-Host "按 Enter 關閉"
 }
