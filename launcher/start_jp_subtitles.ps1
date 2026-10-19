@@ -13,6 +13,7 @@ $Model    = "qwen3.5:9b"
 $Settings = Join-Path $Root "user_settings.json"
 $Helper   = Join-Path $Root "launcher\set_api_base.py"
 $UpdateScript = Join-Path $Root "launcher\update.ps1"
+$WatchdogScript = Join-Path $Root "launcher\gpu_watchdog.ps1"
 $PidFile  = Join-Path $Root "launcher\ollama.pid"
 
 function Write-Info { param($m) Write-Host "[資訊] $m" -ForegroundColor Cyan }
@@ -162,6 +163,16 @@ $null = Start-Job -ArgumentList $Port, $Model -ScriptBlock {
 # ---- Step 3: point LiveTranslate at the right port ----
 if (Test-Path $Settings) {
     & $Python -I $Helper $Settings "http://127.0.0.1:$Port/v1" $Model
+}
+
+# ---- Step 3b: 看門狗（隱藏視窗，叉掉本視窗或程式當掉時也會釋放顯示卡） ----
+if (Test-Path $WatchdogScript) {
+    $wdLog = Join-Path $Root "logs\gpu_watchdog.log"
+    New-Item -ItemType Directory -Force -Path (Join-Path $Root "logs") | Out-Null
+    Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$WatchdogScript`"",
+        "-ParentPid", $PID, "-Port", $Port, "-PidFile", "`"$PidFile`"", "-LogFile", "`"$wdLog`""
+    ) | Out-Null
 }
 
 # ---- Step 4: LiveTranslate ----
