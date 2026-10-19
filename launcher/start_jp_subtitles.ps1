@@ -6,7 +6,7 @@
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Continue"
 
-$Root     = "D:\workspace\language_translate"
+$Root     = Split-Path -Parent $PSScriptRoot   # launcher\ 的上一層，搬資料夾也不用改
 $Python   = Join-Path $Root ".venv\Scripts\python.exe"
 $Ollama   = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 $Model    = "qwen3.5:9b"

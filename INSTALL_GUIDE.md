@@ -45,6 +45,9 @@
 
 ## 2. 從零重裝的完整步驟
 
+> **最快的方式（本 fork）**：把資料夾放到沒有中文與空格的路徑，雙擊 `LiveTranslate.bat`。找不到 `.venv` 時會自動執行 `launcher\setup.ps1`：檢查驅動／網路／磁碟 → 用 winget 安裝缺少的 Python、Git、Ollama → 建 `.venv` 並依顯示卡自動選 cu128/cu126 → 寫入 cuBLAS DLL 預載 → 下載 Whisper large-v3-turbo → 寫預設設定，最後啟動並下載 qwen3.5:9b。過程記錄在 `logs\setup_*.log`。唯一要先手動裝的是 NVIDIA 驅動。給一般使用者的說明見 `快速開始.md`。下面是對應的手動步驟。
+
+
 > 以下指令都在 **PowerShell** 執行。若只是想重新安裝，先看第 7 節解除安裝。
 
 ### 步驟 1：檢查環境

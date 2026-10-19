@@ -1,6 +1,6 @@
 ﻿# 驗證 GPU / faster-whisper CUDA / Ollama 是否正常
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Root   = "D:\workspace\language_translate"
+$Root   = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 $Ollama = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 

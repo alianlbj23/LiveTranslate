@@ -2,18 +2,20 @@
 # 雙擊 LiveTranslate.bat 會開這個選單；$AutoStartSeconds 秒內沒按鍵就自動啟動雙字幕。
 # 也可直接指定動作（捷徑用）：powershell -File menu.ps1 -Action start | verify
 param(
-    [ValidateSet("menu", "start", "verify")]
+    [ValidateSet("menu", "start", "verify", "setup")]
     [string]$Action = "menu",
     [int]$AutoStartSeconds = 3
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Root     = "D:\workspace\language_translate"
+$Root     = Split-Path -Parent $PSScriptRoot   # launcher\ 的上一層，搬資料夾也不用改
 $Python   = Join-Path $Root ".venv\Scripts\python.exe"
 $Ollama   = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 $Settings = Join-Path $Root "user_settings.json"
 $Helper   = Join-Path $Root "launcher\set_api_base.py"
 $StartScript  = Join-Path $Root "launcher\start_jp_subtitles.ps1"
 $VerifyScript = Join-Path $Root "launcher\verify.ps1"
+$SetupScript  = Join-Path $Root "launcher\setup.ps1"
+$ReadyMarker  = Join-Path $Root ".venv\.livetranslate-ready"
 
 function Get-ActivePort {
     if (Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue) { return 11435 }
@@ -83,6 +85,16 @@ function Invoke-Choice {
         ""  { & $StartScript }
         default { Write-Host "無效的選項：$Choice" -ForegroundColor Yellow }
     }
+}
+
+if ($Action -eq "setup")  { & $SetupScript;  exit $LASTEXITCODE }
+
+# 第一次使用（沒有 .venv 或安裝沒跑完）：先自動安裝
+if (-not (Test-Path $Python) -or -not (Test-Path $ReadyMarker)) {
+    Write-Host "尚未安裝（找不到 .venv 或安裝未完成），開始一鍵安裝..." -ForegroundColor Yellow
+    & $SetupScript
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+    if (-not (Test-Path $Python)) { exit 1 }
 }
 
 if ($Action -eq "start")  { & $StartScript;  exit $LASTEXITCODE }
