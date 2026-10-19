@@ -2367,6 +2367,22 @@ def main():
     subwin.line_visibility_requested.connect(on_set_subwin_line_visibility)
     overlay.subtitle_line_visibility_toggled.connect(on_set_subwin_line_visibility)
     overlay.set_subtitle_line_visibility(*subwin.line_visibility())
+
+    # Previous sentence on/off: right-click menu or the 字幕 dropdown
+    def on_set_subwin_show_previous(show):
+        applied = subwin.set_show_previous(show)
+        panel._subtitle_widget._settings["show_previous"] = applied
+        settings = panel.get_settings()
+        sm = settings.get("subtitle_mode") or {}
+        sm["show_previous"] = applied
+        settings["subtitle_mode"] = sm
+        panel._current_settings["subtitle_mode"] = sm
+        _save_settings(settings)
+        overlay.set_subtitle_show_previous(applied)
+
+    subwin.show_previous_requested.connect(on_set_subwin_show_previous)
+    overlay.subtitle_show_previous_toggled.connect(on_set_subwin_show_previous)
+    overlay.set_subtitle_show_previous(subwin.show_previous())
     overlay.set_subtitle_lock_state(subwin.is_locked(), subwin_ct_action.isChecked())
 
     # Connect overlay subtitle button
@@ -2383,6 +2399,7 @@ def main():
         subwin_ct_action.blockSignals(False)
         overlay.set_subtitle_lock_state(bool(s.get("locked", False)), bool(s.get("click_through", False)))
         overlay.set_subtitle_line_visibility(*subwin.line_visibility())
+        overlay.set_subtitle_show_previous(subwin.show_previous())
 
     panel.subtitle_settings_changed.connect(_on_panel_subtitle_changed)
 

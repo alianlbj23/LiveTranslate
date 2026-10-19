@@ -72,6 +72,8 @@ DEFAULT_SUBTITLE_WIN_SETTINGS = {
     # Which line types are displayed; at least one stays on
     "show_original": True,
     "show_translation": True,
+    # False: show only the newest sentence (the one being spoken, else the last final one)
+    "show_previous": True,
     "lines": [
         {
             "type": "original",
@@ -526,6 +528,22 @@ class _EditFrame(QWidget):
         p.end()
 
 
+def _parse_bool(value, default):
+    """Settings come from user_settings.json (external input): accept real booleans,
+    0/1 and the usual true/false spellings; anything else yields `default`."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "1", "yes", "on"):
+            return True
+        if v in ("false", "0", "no", "off"):
+            return False
+    return default
+
+
 class SubtitleWindow(QWidget):
     """Clean text-only subtitle window for OBS capture.
 
@@ -541,6 +559,7 @@ class SubtitleWindow(QWidget):
     # Right-click menu: lock position toggle and open settings (main syncs state)
     lock_requested = pyqtSignal(bool)
     line_visibility_requested = pyqtSignal(bool, bool)  # (show original, show translation)
+    show_previous_requested = pyqtSignal(bool)
     settings_requested = pyqtSignal()
     # Live preview of the sentence being spoken: (original, provisional translation, flags)
     live_signal = pyqtSignal(str, str, int, int)
@@ -871,6 +890,21 @@ class SubtitleWindow(QWidget):
         self._fit_height_snap()
         return (show_o, show_t)
 
+    # --- Previous sentence on/off ---
+    def show_previous(self) -> bool:
+        return _parse_bool(self._settings.get("show_previous", True), True)
+
+    def set_show_previous(self, value) -> bool:
+        """Show the previous sentence next to the newest one, or only the newest.
+        Unrecognised values are ignored and the current state is returned."""
+        show = _parse_bool(value, None)
+        if show is None:
+            return self.show_previous()
+        self._settings["show_previous"] = show
+        self._refresh_display()
+        self._fit_height_snap()
+        return show
+
     def _build_context_menu(self) -> QMenu:
         menu = QMenu(self)
         lock = menu.addAction(t("subwin_menu_lock"))
@@ -895,6 +929,10 @@ class SubtitleWindow(QWidget):
         trans.triggered.connect(
             lambda checked: self.line_visibility_requested.emit(self.line_visibility()[0], bool(checked))
         )
+        prev = menu.addAction(t("subwin_menu_show_previous"))
+        prev.setCheckable(True)
+        prev.setChecked(self.show_previous())
+        prev.triggered.connect(lambda checked: self.show_previous_requested.emit(bool(checked)))
         menu.addSeparator()
         settings = menu.addAction(t("subwin_menu_settings"))
         settings.triggered.connect(self.settings_requested.emit)
@@ -1219,6 +1257,9 @@ class SubtitleWindow(QWidget):
         if self._live is not None:
             live_o, live_t = self._live
             items.append((live_o, {"": live_t if live_t else "\u2026"}))
+        if not self.show_previous():
+            # Newest only: the live sentence if someone is speaking, else the last final one
+            items = items[-1:]
         if not items:
             for tw in self._text_widgets:
                 tw.set_text("")
