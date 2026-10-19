@@ -28,7 +28,7 @@ function Switch-Model {
     try { Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/version" -TimeoutSec 2 | Out-Null; $alive = $true } catch {}
     if (-not $alive) {
         Write-Host "Ollama 沒有在執行，先啟動 Windows 版 Ollama..." -ForegroundColor Yellow
-        $env:OLLAMA_HOST = "127.0.0.1:$port"; $env:OLLAMA_KEEP_ALIVE = "30m"; $env:OLLAMA_FLASH_ATTENTION = "1"; $env:OLLAMA_KV_CACHE_TYPE = "q8_0"; $env:OLLAMA_NUM_PARALLEL = "1"; $env:OLLAMA_CONTEXT_LENGTH = "2048"
+        $env:OLLAMA_HOST = "127.0.0.1:$port"; $env:OLLAMA_KEEP_ALIVE = "30m"; $env:OLLAMA_FLASH_ATTENTION = "1"; $env:OLLAMA_KV_CACHE_TYPE = "q8_0"; $env:OLLAMA_NUM_PARALLEL = "2"; $env:OLLAMA_CONTEXT_LENGTH = "2048"
         $p = Start-Process -FilePath $Ollama -ArgumentList "serve" -WindowStyle Hidden -PassThru; Set-Content -Path (Join-Path $Root "launcher\ollama.pid") -Value $p.Id -Encoding ascii
         Start-Sleep -Seconds 5
     }

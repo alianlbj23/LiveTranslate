@@ -72,7 +72,7 @@ function Start-WindowsOllama {
     $env:OLLAMA_KEEP_ALIVE      = "30m"     # 閒置 30 分鐘才卸載（正常結束時會立刻釋放，這是保險）
     $env:OLLAMA_FLASH_ATTENTION = "1"       # 省顯示記憶體、提示詞處理較快
     $env:OLLAMA_KV_CACHE_TYPE   = "q8_0"    # KV cache 量化成 8-bit：顯示記憶體省一半，翻譯品質幾乎無差
-    $env:OLLAMA_NUM_PARALLEL    = "1"       # 一次只處理一個請求：KV cache 只配置一份，請求排隊而不是搶 GPU
+    $env:OLLAMA_NUM_PARALLEL    = "2"       # 2 個槽：正式翻譯與即時預覽不互相排隊；KV cache 仍比預設 4 槽省
     $env:OLLAMA_CONTEXT_LENGTH  = "2048"    # 字幕翻譯一次只需幾百個 token，2048 夠用且省顯示記憶體
     $p = Start-Process -FilePath $Ollama -ArgumentList "serve" -WindowStyle Hidden -PassThru
     Set-Content -Path $PidFile -Value $p.Id -Encoding ascii
@@ -158,16 +158,6 @@ if (Test-HasModel $Port) {
     }
 }
 
-# 背景預先把模型載入顯示卡（LiveTranslate 載入語音模型的同時進行，第一句就不用等）
-Write-Info "背景預先載入翻譯模型..."
-$null = Start-Job -ArgumentList $Port, $Model -ScriptBlock {
-    param($p, $m)
-    try {
-        $body = '{"model":"' + $m + '","keep_alive":"30m"}'
-        Invoke-RestMethod -Uri "http://127.0.0.1:$p/api/generate" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 300 | Out-Null
-    } catch {}
-}
-
 # ---- Step 3: point LiveTranslate at the right port ----
 if (Test-Path $Settings) {
     & $Python -I $Helper $Settings "http://127.0.0.1:$Port/v1" $Model
@@ -183,13 +173,27 @@ if (Test-Path $WatchdogScript) {
     ) | Out-Null
 }
 
-# ---- Step 4: LiveTranslate ----
+# ---- Step 4: LiveTranslate（先啟動程式，趁它載入 Whisper 的同時把翻譯模型暖機） ----
 Write-Info "啟動 LiveTranslate（第一次載入語音模型約需 5-10 秒）..."
 Write-Info "關閉方式：右下角系統匣圖示 -> 結束，或字幕視窗右上角「結束」。"
 Set-Location $Root
-& $Python main.py
-$code = $LASTEXITCODE
-Get-Job | Remove-Job -Force -ErrorAction SilentlyContinue
+$app = Start-Process -FilePath $Python -ArgumentList "main.py" -WorkingDirectory $Root -NoNewWindow -PassThru
+
+# 暖機：載入模型並真的跑一次翻譯，確保第一句不會等待模型載入而逾時
+Write-Info "翻譯模型暖機中..."
+try {
+    $body = '{"model":"' + $Model + '","keep_alive":"30m"}'
+    Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/generate" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 180 | Out-Null
+    $chat = '{"model":"' + $Model + '","messages":[{"role":"user","content":"hi"}],"max_tokens":4,"reasoning_effort":"none"}'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/chat/completions" -Method Post -ContentType "application/json" -Body $chat -TimeoutSec 120 | Out-Null
+    Write-Ok ("翻譯模型就緒（第一次回應 {0} ms）。" -f [int]$sw.ElapsedMilliseconds)
+} catch {
+    Write-Warn "暖機失敗：$($_.Exception.Message)（程式仍會啟動，第一句翻譯可能較慢）"
+}
+
+$app.WaitForExit()
+$code = $app.ExitCode
 
 # ---- Step 5: release the GPU ----
 Write-Info "釋放顯示記憶體：卸載翻譯模型並關閉本腳本啟動的 Ollama..."

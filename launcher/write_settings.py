@@ -84,6 +84,7 @@ def main() -> int:
             "silence_duration": 0.5,
             # --- translation ---
             "target_language": "zh",
+            "timeout": 10,  # 翻譯總時間上限（秒）；5 秒在模型剛載入或排隊時太緊
             # 獨立字幕視窗：同時顯示 2 句、每句最短顯示 0.3 秒，講得快也跟得上
             "subtitle_mode": {"sentences": 2, "min_display_ms": 300},
             "system_prompt": SYSTEM_PROMPT,
