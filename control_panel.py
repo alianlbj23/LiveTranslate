@@ -1096,7 +1096,18 @@ class ControlPanel(FluentWindow):
         self._subtitle_widget.settings_changed.connect(self._on_subtitle_settings_changed)
         return self._subtitle_widget
 
+    # Changed at runtime by menus / dragging, never by the subtitle settings page. The
+    # page keeps an older copy of them, so its edits must not send those values back
+    # (e.g. "固定位置" from the right-click menu was undone by any edit on the page).
+    _SUBWIN_RUNTIME_KEYS = ("enabled", "locked", "window_x", "window_y",
+                            "show_original", "show_translation", "show_previous")
+
     def _on_subtitle_settings_changed(self, s):
+        current = self._current_settings.get("subtitle_mode") or {}
+        if current is not s:
+            for key in self._SUBWIN_RUNTIME_KEYS:
+                if key in current:
+                    s[key] = current[key]  # s is the page's own dict, so its copy is synced too
         self._current_settings["subtitle_mode"] = s
         self._auto_save()
         self.subtitle_settings_changed.emit(s)
