@@ -282,3 +282,29 @@ def test_stop_shuts_down_live_executor():
     with pytest.raises(RuntimeError):
         app._live_executor.submit(lambda: None)
     assert isinstance(main_module.LiveTranslateApp, type)
+
+
+class _Panel:
+    def __init__(self, asr_language):
+        self._s = {"asr_language": asr_language}
+
+    def get_settings(self):
+        return self._s
+
+
+def test_live_preview_skips_text_in_another_language_than_the_forced_one():
+    """Regression 2026-10-20: Fun-ASR-MLT-Nano heard Japanese as Korean. Final lines are
+    dropped by the language filter; the live preview must not flash / translate them either."""
+    app = _app()
+    app._panel = _Panel("ja")
+    app._emit_live_preview("위여", "ko")
+    assert app._subwin.live_calls == [] and app._live_last_text == ""
+    app._emit_live_preview("本当に", "ja")
+    assert app._live_last_text == "本当に" and len(app._subwin.live_calls) == 1
+
+
+def test_live_preview_with_auto_language_shows_everything():
+    app = _app()
+    app._panel = _Panel("auto")
+    app._emit_live_preview("위여", "ko")
+    assert app._live_last_text == "위여"

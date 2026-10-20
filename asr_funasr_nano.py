@@ -12,6 +12,62 @@ log = logging.getLogger("LiveTranslate.FunASR-Nano")
 # Add bundled code to path so model.py can resolve its imports (ctc, tools.utils)
 _NANO_DIR = os.path.join(os.path.dirname(__file__), "funasr_nano")
 
+# The models take the language as a Chinese name inside the prompt ("语音转写成日文："),
+# not as a code: "ja" means nothing to them (model card, "Language control"). Keys are the
+# app's ASR language codes (i18n.LANGUAGES) that Fun-ASR-MLT-Nano-2512 supports.
+FUNASR_LANGUAGE_NAMES = {
+    "zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文",
+    "vi": "越南语", "id": "印尼语", "th": "泰语", "ms": "马来语", "ar": "阿拉伯语", "hi": "印地语",
+    "cs": "捷克语", "da": "丹麦语", "nl": "荷兰语", "fi": "芬兰语", "el": "希腊语", "hu": "匈牙利语",
+    "pl": "波兰语", "pt": "葡萄牙语", "ro": "罗马尼亚语", "sv": "瑞典语",
+}
+# Fun-ASR-Nano-2512 (non-MLT) only knows Chinese, English and Japanese
+_NANO_LANGUAGES = {"zh", "en", "ja"}
+
+
+def prompt_language_name(engine_type: str, code):
+    """Chinese language name for the prompt, or None (no hint) when the model lacks it."""
+    if not code:
+        return None
+    if engine_type == "funasr-nano" and code not in _NANO_LANGUAGES:
+        return None
+    return FUNASR_LANGUAGE_NAMES.get(code)
+
+
+def _script_counts(text: str):
+    hangul = kana = han = latin = 0
+    for c in text:
+        o = ord(c)
+        if 0xAC00 <= o <= 0xD7AF or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F:
+            hangul += 1
+        elif 0x3040 <= o <= 0x30FF or 0x31F0 <= o <= 0x31FF or 0xFF66 <= o <= 0xFF9F:
+            kana += 1
+        elif 0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF:
+            han += 1
+        elif c.isascii() and c.isalpha():
+            latin += 1
+    return hangul, kana, han, latin
+
+
+def script_language(text: str, forced: str) -> str:
+    """The forced language, unless the text is mostly written in another language's
+    script (the prompt is only a hint: MLT sometimes answers Japanese audio in Korean).
+    Latin letters are neutral for ja / ko (romaji, English words)."""
+    hangul, kana, han, latin = _script_counts(text)
+    if forced == "ja":
+        return "ko" if hangul > kana + han else "ja"
+    if forced == "ko":
+        if kana + han > hangul:
+            return "ja" if kana else "zh"
+        return "ko"
+    if forced == "en":
+        if hangul + kana + han > latin:
+            if hangul >= kana + han:
+                return "ko"
+            return "ja" if kana else "zh"
+        return "en"
+    return forced
+
 
 class FunASRNanoEngine:
     """Speech-to-text using Fun-ASR-Nano-2512 or Fun-ASR-MLT-Nano-2512."""
@@ -40,6 +96,8 @@ class FunASRNanoEngine:
             ensure_qwen_weights(local, hub=hub)
             neutralize_funasr_requirements(local)
 
+        self._engine_type = engine_type
+        self._prompt_language = None
         prev_cwd = os.getcwd()
         if local:
             os.chdir(local)
@@ -58,8 +116,14 @@ class FunASRNanoEngine:
 
     def set_language(self, language: str):
         old = self.language
-        self.language = language if language != "auto" else None
-        log.info(f"Fun-ASR-Nano language: {old} -> {self.language}")
+        self.language = language if language and language != "auto" else None
+        self._prompt_language = prompt_language_name(self._engine_type, self.language)
+        if self.language and not self._prompt_language:
+            log.warning(
+                f"{self._engine_type} does not support language '{self.language}'; "
+                "recognizing without a language hint"
+            )
+        log.info(f"Fun-ASR-Nano language: {old} -> {self.language} (prompt: {self._prompt_language or 'none'})")
 
     def to_device(self, device: str):
         self._model.model.to(device)
@@ -85,8 +149,8 @@ class FunASRNanoEngine:
                 wf.writeframes(audio_16bit.tobytes())
 
             kwargs = {"input": [tmp], "batch_size": 1, "disable_pbar": True}
-            if self.language:
-                kwargs["language"] = self.language
+            if self._prompt_language:
+                kwargs["language"] = self._prompt_language
 
             with torch.inference_mode():
                 result = self._model.generate(**kwargs)
@@ -108,7 +172,13 @@ class FunASRNanoEngine:
         if not text or text == "sil":
             return None
 
-        detected_lang = self.language or self._guess_language(text)
+        if self.language:
+            # main.py's language filter drops results whose language differs from the setting
+            detected_lang = script_language(text, self.language)
+            if detected_lang != self.language:
+                log.info(f"Expected '{self.language}' but the text is '{detected_lang}': {text[:60]}")
+        else:
+            detected_lang = self._guess_language(text)
 
         log.debug(f"ASR: {text}")
         return {

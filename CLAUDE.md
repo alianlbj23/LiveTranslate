@@ -178,6 +178,7 @@ Continuous speech is processed incrementally to reduce latency (enabled by `incr
 - `Translator` defaults to 10s timeout via `make_openai_client()` to prevent API calls from hanging indefinitely
 - Log window is created at startup but hidden; shown via tray menu "Show Log"
 - Audio chunk duration is 32ms (512 samples at 16kHz), matching Silero VAD's native window size for minimal latency
+- Fun-ASR-Nano / MLT-Nano take the language as a Chinese name in the prompt (`语音转写成日文：`), not a code: `asr_funasr_nano.prompt_language_name()` maps the ASR language code (ja→日文, ko→韩文, en→英文, …; Nano knows only zh/en/ja, unsupported → no hint + warning). The prompt is only a hint, so with a forced language `script_language()` labels a result written in another script (e.g. Hangul for ja) with that language and main.py's language filter drops it; `_emit_live_preview` applies the same filter
 - FunASR `disable_pbar=True` required in all `generate()` calls — tqdm crashes in GUI process when flushing stderr
 - ASR engine lifecycle: the GUI process never instantiates `ASREngine`, `FunASREngine`, or `AnimeWhisperEngine` directly. It owns an `ASRClient`; each worker process owns one concrete backend/model. Engine/model/device changes shut down the current worker first, then start a new worker. On target load failure, the saved previous worker config is used to restore ASR.
 - Whisper (ctranslate2) only accepts `device="cuda"` not `"cuda:0"`; device index passed via `device_index` param. Parsed from combo text like `"cuda:0 (RTX 4090)"` in `_switch_asr_engine`

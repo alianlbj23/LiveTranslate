@@ -1710,6 +1710,11 @@ class LiveTranslateApp:
             return
         if not any(c.isalnum() for c in text):
             return
+        forced = self._panel.get_settings().get("asr_language", "auto") if self._panel else "auto"
+        if forced != "auto" and lang != forced:
+            # same rule as the language filter for final lines: do not flash / translate it
+            log.debug(f"Live preview skipped: expected '{forced}' but got '{lang}': {text[:60]}")
+            return
         self._live_last_text = text
         self._live_lang = lang
         self._live_seq += 1
