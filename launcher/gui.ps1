@@ -1,7 +1,7 @@
 ﻿# LiveTranslate 啟動視窗（LiveTranslate.bat → menu.ps1 會先開這個；開不了才退回文字選單）
 # 判斷邏輯放在獨立函式（Get-LauncherCatalog / Test-OllamaModelDownloaded / Format-ModelChoice /
 # Resolve-SwitchRequest），視窗只負責顯示與回傳使用者的選擇，方便測試。
-# 用法：. (Join-Path $Root "launcher\gui.ps1")；$r = Show-LauncherWindow ...；$r.Action = start | verify | guide | switch | exit
+# 用法：. (Join-Path $Root "launcher\gui.ps1")；$r = Show-LauncherWindow ...；$r.Action = start | verify | guide | bench | switch | exit
 #       start / switch 的 $r.Model 是要換成的模型（$null = 沿用目前的模型）
 
 function Get-LauncherCatalog {
@@ -199,10 +199,12 @@ function New-LauncherForm {
     $grp.Controls.Add($btnSwitch)
 
     $buttons = @{}
-    foreach ($spec in @(@("btnVerify", "檢查環境", 20, "verify"), @("btnGuide", "使用說明", 200, "guide"), @("btnExit", "離開", 380, "exit"))) {
+    $row = @(@("btnVerify", "檢查環境", 20, "verify"), @("btnBench", "最佳組合評測", 152, "bench"),
+             @("btnGuide", "使用說明", 284, "guide"), @("btnExit", "離開", 416, "exit"))
+    foreach ($spec in $row) {
         $b = New-Object System.Windows.Forms.Button
         $b.Name = $spec[0]; $b.Text = $spec[1]; $b.Tag = $spec[3]
-        $b.Location = New-Object System.Drawing.Point($spec[2], 296); $b.Size = New-Object System.Drawing.Size(160, 36)
+        $b.Location = New-Object System.Drawing.Point($spec[2], 296); $b.Size = New-Object System.Drawing.Size(124, 36)
         $b.Add_Click($onAction)
         $form.Controls.Add($b)
         $buttons[$spec[0]] = $b

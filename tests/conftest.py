@@ -52,6 +52,14 @@ _REAL_SELECTED = _ROOT / "launcher" / "selected_model.txt"
 _REAL_SELECTED_DIGEST = _digest(_REAL_SELECTED)
 _local_models.SELECTED_MODEL_FILE = _SANDBOX_DIR / "selected_model.txt"
 
+# The benchmark (bench/) reads and, when applying a recommendation, writes the same two
+# files; its clips / results folders go to the sandbox too
+import bench.paths as _bench_paths  # noqa: E402
+
+_bench_paths.SETTINGS_FILE = _SANDBOX_DIR / "user_settings.json"
+_bench_paths.SELECTED_MODEL_FILE = _SANDBOX_DIR / "selected_model.txt"
+os.environ.setdefault("LIVETRANSLATE_BENCH_DIR", str(_SANDBOX_DIR / "bench"))
+
 
 def pytest_sessionfinish(session, exitstatus):
     if _digest(_REAL_SETTINGS) != _REAL_DIGEST:

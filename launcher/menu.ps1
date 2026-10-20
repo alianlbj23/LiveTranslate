@@ -20,6 +20,8 @@ $ModelFile    = Join-Path $Root "launcher\selected_model.txt"
 $GuideFile    = Join-Path $Root "INSTALL_GUIDE.md"
 . (Join-Path $Root "launcher\model.ps1")
 . (Join-Path $Root "launcher\gui.ps1")
+. (Join-Path $Root "launcher\process.ps1")
+. (Join-Path $Root "launcher\bench.ps1")
 
 function Get-ActivePort {
     if (Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue) { return 11435 }
@@ -73,6 +75,8 @@ function Show-TextMenu {
     }
     $guideNo = $catalog.Count + 3
     Write-Host (" {0}) 開啟安裝說明 INSTALL_GUIDE.md" -f $guideNo)
+    $benchNo = $guideNo + 1
+    Write-Host (" {0}) 最佳組合評測（找出最好的辨識＋翻譯組合）" -f $benchNo)
     Write-Host "    （每次啟動會自動檢查更新；按「結束」關閉程式就會釋放顯示卡）" -ForegroundColor DarkGray
     Write-Host " 0) 離開"
     $choice = (Read-Host "請輸入數字（直接按 Enter = 啟動）").Trim()
@@ -82,6 +86,7 @@ function Show-TextMenu {
     if ($choice -eq "0") { return @{ Action = "exit" } }
     if ([int]::TryParse($choice, [ref]$n)) {
         if ($n -eq $guideNo) { return @{ Action = "guide" } }
+        if ($n -eq $benchNo) { return @{ Action = "bench" } }
         if ($n -ge 3 -and $n -lt $guideNo) {
             $e = $catalog[$n - 3]
             $ask = { param($text) ((Read-Host ($text.Replace("`n`n", " ") + " (y/N)")).Trim().ToLower() -eq "y") }
@@ -130,6 +135,7 @@ while ($true) {
         }
         "verify" { & $VerifyScript; [void](Read-Host "按 Enter 回到選單") }
         "guide"  { Start-Process $GuideFile }
+        "bench"  { Show-BenchMenu -Root $Root -Python $Python }
         "switch" { [void](Switch-Model $r.Model); [void](Read-Host "按 Enter 回到選單") }
         "none"   { }
         default  { exit 0 }

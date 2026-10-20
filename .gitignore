@@ -33,3 +33,7 @@ release/
 launcher/ollama.pid
 launcher/selected_model.txt
 launcher/selected_model.txt.tmp
+
+# best-combination benchmark: downloaded test clips, results and settings backups (local only)
+bench_clips/
+bench_results/
