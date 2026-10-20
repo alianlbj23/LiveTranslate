@@ -29,7 +29,7 @@ function Show-BenchMenu {
         Write-Host ""
         Write-Host "==== 最佳組合評測：找出看動畫和 VTuber 最好的辨識＋翻譯組合 ====" -ForegroundColor Magenta
         [void](Invoke-BenchAction -Root $Root -Python $Python -Action "status")
-        Write-Host " 1) 下載測試資料（約 80 MB，只需要一次）"
+        Write-Host " 1) 下載測試資料（約 550 MB，只需要一次）"
         Write-Host " 2) 開始評測（選階段與資料集，開始前顯示預估時間與費用）"
         Write-Host " 3) 從上次中斷的地方繼續"
         Write-Host " 4) 查看報告（自動打開 report.html）"

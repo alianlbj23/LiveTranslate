@@ -51,6 +51,7 @@ def make_world(tmp_path, monkeypatch):
             entries.append({"id": cid, "row": i, "duration": 1.0, "ref": ref})
         spec = datasets.DATASETS[key]
         (folder / "manifest.json").write_text(json.dumps({
+            "method": datasets.METHOD, "per_group": datasets.PER_GROUP,
             "hf_id": spec["hf_id"], "split": spec["split"], "seed": datasets.SEED, "n_target": n,
             "warmup": entries[:datasets.WARMUP_CLIPS], "clips": entries[datasets.WARMUP_CLIPS:],
             "skipped": [], "complete": True}, ensure_ascii=False), encoding="utf-8")

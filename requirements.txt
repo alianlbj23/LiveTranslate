@@ -36,6 +36,8 @@ opencc-python-reimplemented>=0.1.7
 # Model hubs
 modelscope>=1.20.0
 huggingface_hub>=0.20.0
+# Best-combination benchmark (bench/): reads the test datasets parquet files on the Hub
+pyarrow==25.0.1
 
 # UI
 PyQt6>=6.5.0

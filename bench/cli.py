@@ -75,10 +75,13 @@ def cmd_status(con: Console) -> int:
 
 # ---------------------------------------------------------------- download
 
-def cmd_download(con: Console, client=None) -> int:
+def cmd_download(con: Console, source_factory=None) -> int:
+    from model_manager import _proxy_env
+
     con.say("", datasets.LICENSE_NOTE, "")
     total = sum(spec["n"] + datasets.WARMUP_CLIPS for spec in datasets.DATASETS.values())
-    con.say(f"會從 Hugging Face 下載 {total} 句（約 80 MB），每次抽到的句子都一樣，大約需要 5–15 分鐘。")
+    con.say(f"會從 Hugging Face 下載 {total} 句（約 {datasets.APPROX_TOTAL_MB} MB；只讀抽到的區塊，不會整包下載），"
+            "每次抽到的句子都一樣，大約需要 10–30 分鐘（看網路速度）。")
     if not con.confirm("開始下載？", True):
         return 0
     try:
@@ -86,26 +89,27 @@ def cmd_download(con: Console, client=None) -> int:
     except settings_io.SettingsError as e:
         log.warning(f"{e}; using the system proxy setting")
         settings = {}
-    client = client or datasets.RowsClient(datasets.make_http_client(settings.get("download_proxy", "system")))
     short = []
-    for key, spec in datasets.DATASETS.items():
-        con.say(f"\n{spec['label']}")
+    with _proxy_env(settings.get("download_proxy", "system")):
+        for key, spec in datasets.DATASETS.items():
+            con.say(f"\n{spec['label']}")
 
-        def progress(k, n, target):
-            sys.stdout.write(f"\r  {n}/{target} 句")
-            sys.stdout.flush()
+            def progress(k, n, target):
+                sys.stdout.write(f"\r  {n}/{target} 句")
+                sys.stdout.flush()
 
-        try:
-            m = datasets.download_dataset(key, client, progress=progress)
-        except datasets.DownloadError as e:
-            log.error(f"Download of {key} stopped: {e}")
-            con.say("", f"  網路錯誤：{e}", "  已下載的部分會保留，稍後再選 1 會從中斷的地方繼續。")
-            return 1
-        con.say(f"\r  完成：{len(m['clips'])}/{spec['n']} 句（略過 {len(m['skipped'])} 筆不合格的資料）")
-        if len(m["clips"]) < spec["n"]:
-            short.append(f"{spec['label']} 只有 {len(m['clips'])}/{spec['n']} 句")
+            try:
+                source = (source_factory or datasets.make_source)(key)
+                m = datasets.download_dataset(key, source, progress=progress, info=lambda t: con.say(f"  {t}"))
+            except datasets.DownloadError as e:
+                log.error(f"Download of {key} stopped: {e}")
+                con.say("", f"  網路錯誤：{e}", "  已下載的部分會保留，稍後再選 1 會從中斷的地方繼續。")
+                return 1
+            con.say(f"\r  完成：{len(m['clips'])}/{spec['n']} 句（略過 {len(m['skipped'])} 筆不合格的資料）")
+            if len(m["clips"]) < spec["n"]:
+                short.append(f"{spec['label']} 只有 {len(m['clips'])}/{spec['n']} 句")
     if short:
-        con.say("", "注意：" + "；".join(short) + "。抽到的候選句裡合格的不夠，評測會用現有的句子。")
+        con.say("", "注意：" + "；".join(short) + "。合格的句子不夠，評測會用現有的句子。")
     return 0
 
 
