@@ -363,3 +363,27 @@ def test_confirm_and_end_of_input():
 def test_plan_json_holds_no_api_key(bench_dir):
     store = state.RunStore.create({"tl_models": [{"fp": "Qwen|qwen|http://x", "name": "Qwen", "model": "qwen"}]})
     assert "api_key" not in json.loads((store.dir / "plan.json").read_text(encoding="utf-8"))["tl_models"][0]
+
+
+def test_aligned_scores_stay_on_the_1_to_10_scale():
+    """Offset alignment shifts a strict judge's scores up; a 10 must not become 10.4."""
+    from bench import analysis
+
+    class Store:
+        plan = {"tl_models": []}
+
+        def read(self, kind):
+            full = {c: 10 for c in judge.CRITERIA}
+            low = {c: 6 for c in judge.CRITERIA}
+            if kind == "tl":
+                return [{"model": "m", "category": "anime", "clip": "1", "source": "x", "ok": True}]
+            if kind == "judge":
+                # shared item: A says 10, B says 6 -> B gets +2; B's 10 on m/anime/1 would be 12
+                return [{"judge": "A", "item": "shared", "scores": full},
+                        {"judge": "B", "item": "shared", "scores": low},
+                        {"judge": "B", "item": "m/anime/1", "scores": full}]
+            return []
+
+    q = analysis.quality_table(Store())[("m", "anime")]
+    assert q["quality"] == 10.0
+    assert all(v == 10.0 for v in q["criteria"].values())

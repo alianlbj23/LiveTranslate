@@ -21,6 +21,11 @@ from bench.textnorm import clip_errors
 CATEGORIES = ("anime", "vtuber")
 CATEGORY_LABELS = {"anime": "動畫", "vtuber": "VTuber"}
 MIN_JUDGE_COVERAGE = 0.8
+
+
+def _on_scale(score: float) -> float:
+    """Aligned scores stay on the judges' 1-10 scale."""
+    return max(1.0, min(10.0, score))
 DEFAULT_TL_TIMEOUT_S = 10.0
 
 
@@ -197,9 +202,9 @@ def quality_table(store) -> dict:
         t["judged"] += 1
         t["self_judged"] |= any(j.get("self") for j in scored)
         t["judges"].update(j["judge"] for j in scored)
-        t["items"].append(mean(judge_mod.item_mean(j["scores"]) - offsets.get(j["judge"], 0.0) for j in scored))
+        t["items"].append(_on_scale(mean(judge_mod.item_mean(j["scores"]) - offsets.get(j["judge"], 0.0) for j in scored)))
         for c in judge_mod.CRITERIA:
-            t["criteria"][c].append(mean(j["scores"][c] - offsets.get(j["judge"], 0.0) for j in scored))
+            t["criteria"][c].append(_on_scale(mean(j["scores"][c] - offsets.get(j["judge"], 0.0) for j in scored)))
     out = {}
     for key, t in table.items():
         coverage = t["judged"] / t["to_judge"] if t["to_judge"] else 1.0
