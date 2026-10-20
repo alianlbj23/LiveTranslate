@@ -147,6 +147,8 @@ testing: "测试中..."
 # 缓存标签页
 mem_warning_msg: "内存占用 {rss}MB 超过阈值, 建议重启 LiveTranslate 释放 ASR 引擎的累积缓存"
 tl_backlog_msg: "有 {n} 句翻译在排队：模型回应非常慢，通常是显存被占满。请关闭其他使用显卡的程序（动态壁纸、游戏、多余的浏览器分页）或改用 qwen3.5:4b。"
+asr_lang_unsupported_msg: "{model} 不支持指定识别语言「{lang}」，将不指定语言识别，结果也不会按语言过滤。要识别 {lang} 请换其他语音识别模型，或把识别语言设为自动。"
+lang_filter_streak_msg: "最近 {n} 句识别为「{got}」，与设定的识别语言「{want}」不符，已略过。如果讲者确实在说这种语言，请到设置修改识别语言。"
 group_transcript: "转录持久化"
 label_auto_save_transcript: "自动保存识别结果到 transcripts/ 文件夹"
 auto_save_transcript_tooltip: "每次会话开启时新建 3 份文件 (原文/译文/全部), 实时追加写入, 不受悬浮窗 50 条上限影响"

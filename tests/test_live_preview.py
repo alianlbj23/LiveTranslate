@@ -179,6 +179,17 @@ class _Audio:
         pass
 
 
+class _Panel:
+    def __init__(self, asr_language):
+        self._s = {"asr_language": asr_language}
+
+    def get_settings(self):
+        return self._s
+
+    def update_home_status(self, **kwargs):
+        pass
+
+
 def _app(asr_text="", live_text="", seq=5):
     import threading
 
@@ -208,6 +219,10 @@ def _app(asr_text="", live_text="", seq=5):
     app._tl_backlog_threshold = 6
     app._tl_backlog_last_warn = 0.0
     app._tl_backlog_callback = None
+    app._lang_notice_callback = None
+    app._lang_drop_streak = 0
+    app._asr_hint_missing = False
+    app._asr_lang_support_key = None
     app._interim_interval = 0.5
     app._interim_pending = ""
     app._interim_active = False
@@ -284,23 +299,32 @@ def test_stop_shuts_down_live_executor():
     assert isinstance(main_module.LiveTranslateApp, type)
 
 
-class _Panel:
-    def __init__(self, asr_language):
-        self._s = {"asr_language": asr_language}
-
-    def get_settings(self):
-        return self._s
-
-
 def test_live_preview_skips_text_in_another_language_than_the_forced_one():
-    """Regression 2026-10-20: Fun-ASR-MLT-Nano heard Japanese as Korean. Final lines are
-    dropped by the language filter; the live preview must not flash / translate them either."""
+    """Regression 2026-10-20: Fun-ASR-MLT-Nano heard Japanese as Korean. Committed lines
+    are dropped by the language filter; the live preview must not show or translate them.
+    The preview sentence is judged by its own text, not by the label of the whole buffer."""
     app = _app()
     app._panel = _Panel("ja")
-    app._emit_live_preview("위여", "ko")
-    assert app._subwin.live_calls == [] and app._live_last_text == ""
+    app._emit_live_preview("위여 가자", "ja")  # buffer labelled ja, this sentence is Hangul
+    assert app._subwin.live_calls == []
+    assert app._live_executor.submitted == []
+    app._emit_live_preview("本当に", "ko")  # engine label differs from the setting
+    assert app._subwin.live_calls == []
     app._emit_live_preview("本当に", "ja")
-    assert app._live_last_text == "本当に" and len(app._subwin.live_calls) == 1
+    assert app._live_last_text == "本当に"
+    assert len(app._subwin.live_calls) == 1
+
+
+def test_skipped_preview_clears_the_previous_one():
+    """Without clearing, the earlier preview and its provisional translation stayed on
+    screen until the subtitle window's 4 s safety timer."""
+    app = _app(live_text="本当に行", seq=5)
+    app._panel = _Panel("ja")
+    app._emit_live_preview("위여 가자", "ja")
+    assert app._subwin.cleared == 1
+    assert app._live_last_text == ""
+    assert app._live_seq == 6
+    assert app._live_executor.submitted == []
 
 
 def test_live_preview_with_auto_language_shows_everything():

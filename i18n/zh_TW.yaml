@@ -147,6 +147,8 @@ testing: "測試中..."
 # 快取分頁
 mem_warning_msg: "記憶體佔用 {rss}MB 超過閾值, 建議重新啟動 LiveTranslate 釋放 ASR 引擎的累積快取"
 tl_backlog_msg: "有 {n} 句翻譯在排隊：模型回應非常慢，通常是顯示記憶體被佔滿。請關閉其他使用顯示卡的程式（動態桌布、遊戲、多餘的瀏覽器分頁）或改用 qwen3.5:4b。"
+asr_lang_unsupported_msg: "{model} 不支援指定辨識語言「{lang}」，會改成不指定語言辨識，結果也不會依語言過濾。要辨識 {lang} 請換其他語音辨識模型，或把辨識語言設成自動。"
+lang_filter_streak_msg: "最近 {n} 句辨識成「{got}」，和設定的辨識語言「{want}」不符，已略過。如果講者確實在說這個語言，請到設定修改辨識語言。"
 group_transcript: "逐字稿儲存"
 label_auto_save_transcript: "自動儲存識別結果到 transcripts/ 資料夾"
 auto_save_transcript_tooltip: "每次會話開啟時新建 3 份檔案 (原文/譯文/全部), 即時追加寫入, 不受懸浮窗 50 條上限影響"

@@ -2,10 +2,13 @@
 
 Regression 2026-10-20: with Fun-ASR-MLT-Nano and the ASR language set to Japanese, some
 Japanese lines came out in Korean (「위여.」「빨리 써.」). The engine passed the setting
-code straight to the model, so the prompt read "语音转写成ja：". The models take the
-language as a Chinese name in the prompt ("日文", "韩文", "英文"; see the model card),
-so "ja" was no hint at all and the 31-language MLT model guessed. The result was also
-labelled with the setting ("ja"), so main.py's language filter never caught it."""
+code straight to the model, so the prompt read "语音转写成ja：". The model card only
+documents Chinese language names in the prompt ("日文", "韩文", "英文"), so "ja" most
+likely gave no hint and the 31-language MLT model guessed.
+
+The engine now sends the documented name (asr_language.prompt_language_name) and labels
+results with the forced language; main.py judges each sentence by its script
+(tests/test_language_filter.py)."""
 import logging
 
 import numpy as np
@@ -68,30 +71,60 @@ def test_language_the_model_does_not_know_sends_no_hint_and_warns(engine_type, c
         eng.set_language(code)
     _, kwargs = _run(eng)
     assert "language" not in kwargs
-    assert any(code in r.getMessage() for r in caplog.records)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.name == "LiveTranslate.FunASR-Nano"]
+    assert len(warnings) == 1 and code in warnings[0].getMessage()
 
 
-@pytest.mark.parametrize("forced, text, expected", [
-    # Japanese forced: Korean output is reported as Korean so main.py drops it
-    ("ja", "위여.", "ko"),
-    ("ja", "여보, 루미나.", "ko"),
-    ("ja", "本当に", "ja"),            # kanji only is still Japanese
-    ("ja", "本当", "ja"),
-    ("ja", "OK、行こう", "ja"),         # romaji / English words are fine
-    ("ja", "ソウルで 먹었다", "ja"),     # mostly Japanese, a Korean word quoted
-    # Korean forced
-    ("ko", "빨리 써.", "ko"),
-    ("ko", "早く書いて", "ja"),
-    ("ko", "OK", "ko"),
-    # English forced
-    ("en", "Hello world", "en"),
-    ("en", "Hello 世界", "en"),
-    ("en", "こんにちは", "ja"),
-    ("en", "안녕하세요", "ko"),
-])
-def test_result_in_another_writing_system_is_labelled_with_that_language(forced, text, expected):
-    eng = _engine(text=text)
-    eng.set_language(forced)
+def test_supported_language_does_not_warn(caplog):
+    eng = _engine()
+    with caplog.at_level(logging.WARNING, logger="LiveTranslate.FunASR-Nano"):
+        eng.set_language("ja")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_switching_to_auto_clears_the_previous_hint():
+    eng = _engine(text="위여.")
+    eng.set_language("ja")
+    eng.set_language("auto")
+    result, kwargs = _run(eng)
+    assert "language" not in kwargs
+    assert result["language"] == "ko"  # auto: guessed from the text
+
+
+def test_switching_to_an_unsupported_language_clears_the_previous_hint():
+    eng = _engine("funasr-nano")
+    eng.set_language("ja")
+    eng.set_language("ko")
+    _, kwargs = _run(eng)
+    assert "language" not in kwargs
+
+
+@pytest.mark.parametrize("bad", [["ja"], 1, {"ja": 1}])
+def test_invalid_language_value_is_rejected_and_keeps_the_previous_state(bad):
+    eng = _engine()
+    eng.set_language("ja")
+    with pytest.raises(ValueError):
+        eng.set_language(bad)
+    assert eng.language == "ja"
+    _, kwargs = _run(eng)
+    assert kwargs["language"] == "日文"
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_empty_language_means_auto(value):
+    eng = _engine()
+    eng.set_language("ja")
+    eng.set_language(value)
+    assert eng.language is None
+    _, kwargs = _run(eng)
+    assert "language" not in kwargs
+
+
+def test_forced_language_labels_the_result_and_main_judges_the_text():
+    """The engine does not relabel: one label for a whole interim buffer would drop the
+    Japanese sentences of a mostly-Korean buffer (and pass a Korean sentence in a mostly-
+    Japanese one). main.py checks every sentence instead."""
+    eng = _engine(text="위여.")
+    eng.set_language("ja")
     result, _ = _run(eng)
-    assert result["language"] == expected
-    assert result["text"] == text
+    assert result == {"text": "위여.", "language": "ja", "language_name": "ja"}
