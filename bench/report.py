@@ -102,6 +102,20 @@ def build(store) -> dict:
              f"評審：{e('、'.join(names.get(j, j) for j in plan.get('judges', [])) or '無')}"
              f"（{'交叉評審' if plan.get('judge_mode') == 'cross' else '單一評審'}）</p>"]
 
+    status = store.state.get("status")
+    if status != "done":
+        what = {"interrupted": "中斷", "error": "因錯誤停止", "running": "還在進行或被強制關閉"}.get(status, status)
+        err = store.state.get("error")
+        parts.append(f"<div class='banner'>評測沒有跑完（{e(what)}），以下結果不完整，推薦只能參考。"
+                     + (f"<br>錯誤：{e(err)}" if err else "") + "</div>")
+    frozen = store.state.get("frozen", {})
+    if frozen.get("vram_baseline_mb") is None and store.read("asr_meta"):
+        parts.append("<div class='banner'>讀不到顯示卡的記憶體用量（NVML），顯示記憶體欄位空白，11 GB 的檢查沒有做。</div>")
+    settle = store.state.get("settle_issues") or []
+    if settle:
+        parts.append(f"<div class='banner'>有 {len(settle)} 次換模型時顯示記憶體沒有完全回落（其他程式也在用顯示卡？），"
+                     "之後的顯示記憶體峰值可能偏高。</div>")
+
     unreliable = [j for j, s in calib.items() if s["misses"] >= 2]
     if unreliable:
         parts.append("<div class='banner'>評審可能不可靠：" + e("、".join(names.get(j, j) for j in unreliable))
@@ -144,7 +158,9 @@ def build(store) -> dict:
                              key=lambda kv: (kv[1].get("cer") is None, kv[1].get("cer") or 0)):
             rank = f"{ranked.index(asr) + 1}" if asr in ranked else "—"
             status = "<span class='ok'>完成</span>" if s.get("complete") else \
-                f"<span class='bad'>{e(s.get('status') or '未完成')} {e(s.get('reason') or '')}</span>"
+                f"<span class='bad'>不排名：{e(s.get('reason') or '沒有跑完')}</span>"
+            if s.get("errors"):
+                status += f"<br><span class='warn'>{s['errors']} 句辨識出錯（算全錯）</span>"
             rows.append([rank, e(asr_label(asr)), pct(s.get("cer")), pct(s.get("cer_raw")), ms(s.get("mean_ms")),
                          ms(s.get("p90_ms")), mb(s.get("vram_peak_mb")), num(s.get("load_s"), 1) + " 秒"
                          if s.get("load_s") is not None else "—", str(s.get("n", 0)), status])
@@ -155,40 +171,53 @@ def build(store) -> dict:
 
     # ---------------------------------------------------------- stage 2
     parts.append("<h2>階段 2｜語音偵測閾值</h2>")
-    if not vad_t:
+    if not plan.get("recordings"):
         parts.append("<p>沒有自己的錄音（bench_clips/live/），已略過。建議使用預設閾值 0.5。</p>")
+    elif not vad_t:
+        parts.append("<p class='bad'>有自己的錄音，但沒有得到評分結果（辨識或評審失敗，原因見下方「略過或失敗的項目」）。"
+                     "建議先用預設閾值 0.5。</p>")
     else:
         rows = []
         for asr, by_th in vad_t.items():
             for th, v in sorted(by_th.items()):
                 best = " ★" if best_th.get(asr) == th else ""
+                judged = f"{v['judged_windows']}/{v['windows']}"
+                if v["errors_per_min"] is None:
+                    judged = f"<span class='bad'>評審失敗 {judged}</span>"
                 rows.append([e(asr_label(asr)), num(th) + best, num(v["hallucinated_per_min"]), num(v["missed_per_min"]),
-                             num(v["errors_per_min"]), str(v["segments"]), pct(v["speech_ratio"]), num(v["minutes"], 1)])
-        parts.append(_table(["辨識模型", "閾值", "幻聽/分鐘", "漏句/分鐘", "合計/分鐘", "片段數", "送辨識比例", "錄音分鐘"],
-                            rows, num_cols=(2, 3, 4, 5, 6, 7)))
+                             num(v["errors_per_min"]), str(v["segments"]), pct(v["speech_ratio"]), num(v["minutes"], 1),
+                             judged])
+        parts.append(_table(["辨識模型", "閾值", "幻聽/分鐘", "漏句/分鐘", "合計/分鐘", "片段數", "送辨識比例", "錄音分鐘",
+                             "已評/總時段"], rows, num_cols=(2, 3, 4, 5, 6, 7)))
 
     # ---------------------------------------------------------- stage 3
     parts.append("<h2>階段 3｜翻譯</h2>")
+    tl_failed = {m["model"]: m.get("reason") for m in store.read("tl_meta") if m.get("status") == "failed"}
     for cat in analysis.CATEGORIES:
         rows = []
         for m in plan.get("tl_models", []):
             q = q_t.get((m["fp"], cat))
             t = tl_t.get((m["fp"], cat))
             if not q and not t:
+                if m["fp"] in tl_failed and cat in plan.get("datasets", []):
+                    rows.append([e(m["name"]), f"<span class='bad'>失敗：{e(tl_failed[m['fp']])}</span>"]
+                                + ["—"] * 9)
                 continue
             q = q or {}
             t = t or {}
             crit = q.get("criteria") or {}
             note = "（自評）" if q.get("self_judged") else ""
-            rows.append([e(m["name"]) + note, num(q.get("quality")), *[num(crit.get(c)) for c in judge_mod.CRITERIA],
+            quality = num(q.get("quality")) if q.get("quality") is not None else \
+                f"<span class='bad'>{e(q.get('note') or '—')}</span>"
+            rows.append([e(m["name"]) + note, quality, *[num(crit.get(c)) for c in judge_mod.CRITERIA],
                          ms(t.get("ttft_mean")), ms(t.get("total_mean")), pct(t.get("fail_rate")),
                          e("、".join(f"{k} {v}" for k, v in (t.get("errors") or {}).items()) or "—"),
-                         str(q.get("judge_fail", 0))])
+                         f"{q.get('judged', 0)}/{q.get('judged', 0) + q.get('unjudged', 0)}"])
         if rows:
-            best = rankings.get(cat, [None])[0]
+            best = (rankings.get(cat) or [None])[0]
             parts.append(f"<h3>{e(analysis.CATEGORY_LABELS[cat])}（翻譯 {e(asr_label(best))} 的辨識結果）</h3>")
             parts.append(_table(["翻譯模型", "品質", *[judge_mod.CRITERIA_LABELS[c] for c in judge_mod.CRITERIA],
-                                 "第一個字", "整句完成", "失敗率", "失敗原因", "評審失敗"], rows,
+                                 "第一個字", "整句完成", "失敗率", "失敗原因", "已評分句數"], rows,
                                 num_cols=(1, 2, 3, 4, 5, 6, 7, 8, 10)))
 
     # ---------------------------------------------------------- combinations
@@ -218,6 +247,10 @@ def build(store) -> dict:
         parts.append(_table(["評審", "校準題符合", "結論"], rows))
         parts.append("<p class='muted'>交叉評審：每個翻譯模型不由自己評分；各評審的尺度用共同評過的題目（校準題、"
                      "兩位評審都評的模型）對齊。只有一個評審時，評它自己的部分標示「自評」。</p>")
+    failed = [t for t in store.state.get("tasks", []) if t.get("status") == "failed"]
+    if failed:
+        parts.append("<h2>略過或失敗的項目</h2>")
+        parts.append(_table(["項目", "原因"], [[e(task_label(t["id"], names)), e(t.get("reason") or "—")] for t in failed]))
     parts.append("<h2>注意事項</h2><ul>" + "".join(f"<li>{e(n)}</li>" for n in NOTES) + "</ul>")
     parts.append("</main></body></html>")
     (store.dir / "report.html").write_text("".join(parts), encoding="utf-8")
@@ -236,16 +269,37 @@ def build(store) -> dict:
                             _r(c["vram_peak_mb"], 0), _r(c["fail_rate"], 3), c["recommended"],
                             "；".join(c["reasons"]), "；".join(c["warnings"])])
 
-    out = []
+    items = []
     for cat, picks in recs.items():
         for p in picks:
             c = p["combo"]
-            out.append({"id": p["id"], "kinds": p["kinds"], "category": cat, "asr": c["asr"],
-                        "asr_label": asr_label(c["asr"]), "vad_threshold": c["vad_threshold"],
-                        "tl_name": c["tl_name"], "tl_model": c["tl_model"], "composite": c["composite"],
-                        "quality": c["quality"], "latency_ms": c["latency_ms"], "recommended": c["recommended"]})
-    (store.dir / "recommendations.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+            items.append({"id": p["id"], "kinds": p["kinds"], "category": cat, "asr": c["asr"],
+                          "asr_label": asr_label(c["asr"]), "vad_threshold": c["vad_threshold"],
+                          "vad_measured": c["vad_measured"], "tl_fp": c["tl"], "tl_name": c["tl_name"],
+                          "tl_model": c["tl_model"], "composite": c["composite"], "quality": c["quality"],
+                          "latency_ms": c["latency_ms"], "recommended": c["recommended"]})
+    (store.dir / "recommendations.json").write_text(json.dumps(
+        {"run": store.dir.name, "status": store.state.get("status"), "items": items}, ensure_ascii=False, indent=1),
+        encoding="utf-8")
     return recs
+
+
+def task_label(task_id: str, names: dict) -> str:
+    kind, _, rest = task_id.partition("/")
+    if kind == "s1":
+        return f"階段 1 辨識：{asr_label(rest)}"
+    if kind == "s2asr":
+        return f"階段 2 語音偵測：{asr_label(rest)}"
+    if kind == "s2judge":
+        return "階段 2 評審"
+    if kind == "s3tl":
+        return f"階段 3 翻譯：{names.get(rest, rest)}"
+    if kind == "s3tog":
+        asr, _, model = rest.partition("/")
+        return f"同時載入：{asr_label(asr)} + {names.get(model, model)}"
+    if kind == "s3judge":
+        return f"評審：{names.get(rest, rest)}"
+    return task_id
 
 
 def _r(x, digits=2):

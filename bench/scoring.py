@@ -55,9 +55,11 @@ def rank_asr(stats: dict) -> list:
 def judge_combo(combo: dict) -> dict:
     """Fills composite, recommended, reasons, warnings."""
     reasons, warnings = [], []
+    labels = {"quality": "翻譯品質", "cer": "辨識準確度", "latency_ms": "同時載入延遲"}
     missing = [k for k in ("quality", "cer", "latency_ms") if combo.get(k) is None]
     if missing:
-        reasons.append("資料不足（" + "、".join(missing) + "）")
+        notes = combo.get("data_notes") or []
+        reasons.append("資料不足：" + ("；".join(notes) if notes else "、".join(labels[k] for k in missing)))
         combo["composite"] = None
     else:
         combo["composite"] = composite(combo["quality"], combo["cer"], combo["latency_ms"])
@@ -67,6 +69,10 @@ def judge_combo(combo: dict) -> dict:
         reasons.append(f"顯示記憶體峰值 {combo['vram_peak_mb'] / 1024:.1f} GB，超過 11 GB")
     if (combo.get("fail_rate") or 0) > FAIL_WARN_RATE:
         warnings.append(f"翻譯失敗率 {combo['fail_rate']:.0%}")
+    if (combo.get("together_fail_rate") or 0) > FAIL_WARN_RATE:
+        warnings.append(f"和辨識同時載入時翻譯失敗率 {combo['together_fail_rate']:.0%}（失敗的句子以逾時計入延遲）")
+    if combo.get("vram_measured") is False:
+        warnings.append("顯示記憶體沒有量測，11 GB 的檢查沒有做")
     if combo.get("quality_approx"):
         warnings.append("翻譯品質沿用最佳 ASR 的分數（近似值）")
     if combo.get("self_judged"):

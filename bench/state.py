@@ -106,8 +106,10 @@ class RunStore:
     def append(self, kind: str, record: dict):
         path = self.dir / "results" / f"{kind}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        # a line cut off by a crash must not swallow the next record
+        broken = path.exists() and path.stat().st_size > 0 and not path.read_bytes().endswith(b"\n")
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(("\n" if broken else "") + json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -147,7 +149,15 @@ def running_pid():
         pid = int(lock_path().read_text(encoding="ascii").strip())
     except (OSError, ValueError):
         return None
-    return pid if pid != os.getpid() and psutil.pid_exists(pid) else None
+    if pid == os.getpid() or not psutil.pid_exists(pid):
+        return None
+    try:
+        cmd = " ".join(psutil.Process(pid).cmdline())
+    except psutil.Error as e:  # cannot inspect it: assume it is a benchmark (safe side)
+        log.debug(f"Cannot inspect lock owner {pid}: {e}")
+        return pid
+    # PIDs are reused: a lock whose PID now belongs to another program is stale
+    return pid if "bench_run.py" in cmd or "pytest" in cmd else None
 
 
 def acquire_lock() -> bool:

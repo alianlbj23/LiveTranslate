@@ -50,7 +50,8 @@ _JSON_RE = re.compile(r"\{.*?\}", re.S)
 
 
 def parse_scores(text: str):
-    """First {...} with the four criteria as numbers -> ints clamped to 1..10, or None."""
+    """First {...} with the four criteria as numbers 0..10 -> ints 1..10, or None. A
+    value outside 0..10 (e.g. a 100-point scale) means the rubric was not followed."""
     for m in _JSON_RE.finditer(text or ""):
         try:
             data = json.loads(m.group(0))
@@ -59,9 +60,13 @@ def parse_scores(text: str):
         if not isinstance(data, dict):
             continue
         try:
-            scores = {c: min(10, max(1, int(round(float(data[c]))))) for c in CRITERIA}
+            values = {c: float(data[c]) for c in CRITERIA}
         except (KeyError, TypeError, ValueError):
             continue
+        if any(not (0 <= v <= 10) for v in values.values()):
+            log.warning(f"Judge scores out of the 1-10 range: {values}")
+            return None
+        scores = {c: min(10, max(1, int(round(v)))) for c, v in values.items()}
         scores["note"] = str(data.get("note", ""))[:40]
         return scores
     return None
@@ -81,7 +86,13 @@ def parse_vad(text: str, n_lines: int):
     missed = data.get("missed", [])
     if not isinstance(lines, list) or not isinstance(missed, list):
         return None
-    hall = sorted({int(x) for x in lines if isinstance(x, (int, float)) and 1 <= int(x) <= n_lines})
+    numbers = []
+    for x in lines:
+        try:
+            numbers.append(int(float(x)))
+        except (TypeError, ValueError):
+            log.debug(f"Ignoring a non-numeric line number from the VAD judge: {x!r}")
+    hall = sorted({n for n in numbers if 1 <= n <= n_lines})
     return {"hallucinated": hall, "missed": [str(x)[:40] for x in missed if str(x).strip()]}
 
 
@@ -102,8 +113,11 @@ class JudgeClient:
         from translator import make_openai_client, resolve_thinking_style, thinking_disable_body
 
         self.entry = entry
-        self._client = client or make_openai_client(entry["api_base"], entry["api_key"],
-                                                    entry.get("proxy", "none"), timeout=timeout)
+        if client is None:
+            # no hidden retries: a failing judge is counted and stopped by the orchestrator
+            client = make_openai_client(entry["api_base"], entry.get("api_key") or "none",
+                                        entry.get("proxy", "none"), timeout=timeout).with_options(max_retries=0)
+        self._client = client
         body = dict(thinking_disable_body(resolve_thinking_style(entry.get("thinking_style"),
                                                                  entry["api_base"], entry["model"])))
         body.update(entry.get("extra_body") or {})
@@ -128,12 +142,14 @@ class JudgeClient:
         user = tl_user_prompt(category, ja, translation)
         for extra in ("", "\n只輸出 JSON，不要其他文字。"):
             try:
-                scores = parse_scores(self.ask(TL_SYSTEM, user + extra))
+                answer = self.ask(TL_SYSTEM, user + extra)
             except Exception as e:  # a failed judge call is counted as judge_fail
-                log.warning(f"Judge call failed: {e}")
-                scores = None
+                log.warning(f"Judge {self.entry.get('name')} call failed: {e}")
+                continue
+            scores = parse_scores(answer)
             if scores:
                 return scores
+            log.warning(f"Judge {self.entry.get('name')} answer is not the JSON asked for: {answer[:120]!r}")
         return None
 
     def vad(self, continuous: str, lines: list):

@@ -63,11 +63,6 @@ def _port_open(port: int) -> bool:
         return False
 
 
-def active_ollama_port() -> int:
-    """Same rule as the launcher: 11435 when something listens there, else 11434."""
-    return 11435 if _port_open(11435) else 11434
-
-
 class Ollama:
     def __init__(self, root_url: str, http=None):
         import httpx
@@ -141,16 +136,20 @@ def start_fast_ollama(port: int, log_dir: Path) -> int:
     env = dict(os.environ)
     env.update(fast_env(port))
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    proc = subprocess.Popen([str(OLLAMA_EXE), "serve"], env=env, creationflags=flags,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    serve_log = Path(log_dir) / "ollama_serve.log"
+    with open(serve_log, "ab") as out:  # the child keeps its own handle
+        proc = subprocess.Popen([str(OLLAMA_EXE), "serve"], env=env, creationflags=flags, stdout=out, stderr=out)
     PID_FILE.write_text(str(proc.pid), encoding="ascii")
     server = Ollama(f"http://127.0.0.1:{port}")
     for _ in range(30):
         time.sleep(1.0)
+        if proc.poll() is not None:
+            raise RuntimeError(f"Ollama 啟動後立刻結束（結束代碼 {proc.returncode}），原因見 {serve_log}")
         if server.alive():
             _start_watchdog(port, log_dir)
             return proc.pid
-    raise RuntimeError("Ollama 在 30 秒內沒有回應")
+    proc.kill()
+    raise RuntimeError(f"Ollama 在 30 秒內沒有回應，原因見 {serve_log}")
 
 
 def _start_watchdog(port: int, log_dir: Path):
@@ -194,6 +193,8 @@ def stop_ollama(pid: int):
         PID_FILE.unlink()
     except FileNotFoundError:
         pass
+    except OSError as e:
+        log.warning(f"Could not remove {PID_FILE}: {e}")
 
 
 def lmstudio_unload_all() -> bool:

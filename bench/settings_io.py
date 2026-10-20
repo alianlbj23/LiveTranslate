@@ -78,9 +78,11 @@ def find_running_app() -> list:
     return found
 
 
-def planned_changes(settings: dict, asr_id: str, vad_threshold: float, tl_entry: dict) -> dict:
-    """{key: (old, new)} for the keys that would change."""
+def planned_changes(settings: dict, asr_id: str, vad_threshold, tl_entry: dict) -> dict:
+    """{key: (old, new)} for the keys that would change. vad_threshold None keeps the
+    current threshold (not measured)."""
     from bench.asr_runner import find_turbo_path
+    from bench.llm_servers import fingerprint
 
     new = dict(ASR_SETTINGS[asr_id])
     if asr_id == "whisper-turbo":
@@ -88,14 +90,25 @@ def planned_changes(settings: dict, asr_id: str, vad_threshold: float, tl_entry:
         if not turbo:
             raise SettingsError("找不到 Whisper large-v3-turbo 模型資料夾")
         new["whisper_model_size"] = turbo
-    new["vad_threshold"] = round(float(vad_threshold), 2)
+    if vad_threshold is not None:
+        new["vad_threshold"] = round(float(vad_threshold), 2)
+    target = fingerprint(tl_entry)
     index = next((i for i, m in enumerate(settings.get("models", []))
-                  if isinstance(m, dict) and m.get("name") == tl_entry.get("name")
-                  and m.get("model") == tl_entry.get("model")), None)
+                  if isinstance(m, dict) and fingerprint(m) == target), None)
     if index is None:
         raise SettingsError(f"設定檔裡找不到翻譯模型「{tl_entry.get('name')}」")
     new["active_model"] = index
     return {k: (settings.get(k), v) for k, v in new.items() if settings.get(k) != v}
+
+
+def apply_notes(tl_entry: dict) -> list:
+    """What the user should know before applying (shown, not blocking)."""
+    import local_models
+
+    if local_models.is_local_ollama(tl_entry):
+        return []
+    return ["這是非 Ollama 的翻譯模型：用啟動視窗（LiveTranslate.bat）啟動時，啟動器會把翻譯模型改回它選的本機模型。"
+            "要使用這個模型，請在字幕開始後，從對話記錄視窗上方的模型選單切換。"]
 
 
 def _atomic_write_json(path: Path, data):
@@ -135,10 +148,15 @@ def apply_changes(changes: dict, tl_entry: dict, settings_path: Path | None = No
     for key, (_old, new) in changes.items():
         settings[key] = new
     _atomic_write_json(settings_path, settings)
+    problem = None
     if load_settings(settings_path) != settings:
-        raise SettingsError(f"寫入後讀回不一致；原本的設定在 {saved}")
-    if local_models.is_local_ollama(tl_entry):
-        local_models.remember_selected(tl_entry)
+        problem = "寫入後讀回的設定不一致"
+    elif local_models.is_local_ollama(tl_entry) and not local_models.remember_selected(tl_entry):
+        problem = f"無法寫入啟動器的 selected_model.txt（{selected_file}）"
+    if problem:
+        log.error(f"Apply failed ({problem}); restoring {saved}")
+        restore(saved, settings_path, selected_file, keep_current=False)
+        raise SettingsError(f"{problem}，已還原成原本的設定。")
     log.info(f"Applied {sorted(changes)}; backup in {saved}")
     return saved
 
@@ -150,20 +168,30 @@ def list_backups() -> list:
     return sorted((d for d in root.iterdir() if (d / "user_settings.json").exists()), reverse=True)
 
 
-def restore(backup_dir: Path, settings_path: Path | None = None, selected_file: Path | None = None):
+def restore(backup_dir: Path, settings_path: Path | None = None, selected_file: Path | None = None,
+            keep_current: bool = True):
+    """Put a backup back. The current files are backed up first (keep_current) so a
+    restore can be undone too; the result is read back and compared."""
     import local_models
 
     if find_running_app():
         raise SettingsError("LiveTranslate 正在執行，請先關閉再還原。")
     settings_path = Path(settings_path or paths.SETTINGS_FILE)
     selected_file = Path(selected_file or local_models.SELECTED_MODEL_FILE)
-    data = json.loads((backup_dir / "user_settings.json").read_text(encoding="utf-8"))
+    try:
+        data = json.loads((Path(backup_dir) / "user_settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SettingsError(f"備份 {backup_dir} 讀不到：{e}") from e
+    if keep_current and settings_path.exists():
+        backup(settings_path, selected_file)
     _atomic_write_json(settings_path, data)
-    sel = backup_dir / "selected_model.txt"
+    sel = Path(backup_dir) / "selected_model.txt"
     if sel.exists():
         tmp = selected_file.with_name(selected_file.name + ".tmp")
         tmp.write_bytes(sel.read_bytes())
         os.replace(tmp, selected_file)
+    if load_settings(settings_path) != data:
+        raise SettingsError("還原後讀回的設定不一致，請手動檢查 user_settings.json")
 
 
 # ---------------------------------------------------------------- control panel steps

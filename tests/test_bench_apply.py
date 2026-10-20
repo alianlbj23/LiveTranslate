@@ -108,10 +108,13 @@ def test_apply_menu_flow(user_files):
     run = state.RunStore.create({"stages": [1]})
     run.state["status"] = "done"
     run.save()
-    (run.dir / "recommendations.json").write_text(json.dumps([
+    from bench.llm_servers import fingerprint
+
+    (run.dir / "recommendations.json").write_text(json.dumps({"run": run.dir.name, "status": "done", "items": [
         {"id": "A1", "kinds": ["品質最好"], "category": "anime", "asr": "sensevoice", "asr_label": "SenseVoice Small",
-         "vad_threshold": 0.4, "tl_name": "Qwen3.5 4B", "tl_model": "qwen3.5:4b", "composite": 80.0,
-         "quality": 8.0, "latency_ms": 900.0, "recommended": True}], ensure_ascii=False), encoding="utf-8")
+         "vad_threshold": 0.4, "vad_measured": True, "tl_fp": fingerprint(MODELS[1]), "tl_name": "Qwen3.5 4B",
+         "tl_model": "qwen3.5:4b", "composite": 80.0, "quality": 8.0, "latency_ms": 900.0, "recommended": True}]},
+        ensure_ascii=False), encoding="utf-8")
     answers = iter(["", "", "y"])  # newest run, A1, confirm
     out = []
     code = cli.cmd_apply(Console(input_fn=lambda p: next(answers), print_fn=out.append))

@@ -33,7 +33,11 @@ class Console:
         self.ask(message)
 
     def choose_one(self, title: str, options: list, default: int = 0, allow_cancel: bool = True):
-        """options: [(key, label)]. Returns the key, or None when cancelled with 0."""
+        """options: [(key, label)]. Returns the key, or None when cancelled with 0 (or
+        when there is nothing to choose)."""
+        if not options:
+            self.say("", "沒有可以選的項目。")
+            return None
         self.say("", title)
         for i, (_key, label) in enumerate(options, 1):
             mark = "  （預設）" if i - 1 == default else ""

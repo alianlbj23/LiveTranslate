@@ -29,10 +29,12 @@ MODELS = [_entry("A Model", "model-a"), _entry("B Model", "model-b"),
 FP = {m["name"]: llm_servers.fingerprint(m) for m in MODELS}
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch):
+def make_world(tmp_path, monkeypatch):
     """Datasets on disk; each clip's audio level encodes a unique id -> (dataset, ref)."""
+    from bench import asr_runner
+
     monkeypatch.setenv("LIVETRANSLATE_BENCH_DIR", str(tmp_path))
+    monkeypatch.setattr(asr_runner, "find_turbo_path", lambda: str(tmp_path / "faster-whisper-large-v3-turbo"))
     by_id = {}
     k = 0
     counts = {"anime": 4, "vtuber": 4, "baseline": 2}
@@ -53,6 +55,11 @@ def world(tmp_path, monkeypatch):
             "warmup": entries[:datasets.WARMUP_CLIPS], "clips": entries[datasets.WARMUP_CLIPS:],
             "skipped": [], "complete": True}, ensure_ascii=False), encoding="utf-8")
     return {"by_id": by_id, "counts": counts, "dir": tmp_path}
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    return make_world(tmp_path, monkeypatch)
 
 
 def _decode(by_id, audio):
@@ -192,6 +199,8 @@ def test_full_run_ranks_skips_cross_judges_and_reports(world):
     html = (store.dir / "report.html").read_text(encoding="utf-8")
     assert "推薦組合" in html and "Anime-Whisper 的訓練資料" in html and "A Model" in html
     recs = json.loads((store.dir / "recommendations.json").read_text(encoding="utf-8"))
+    assert recs["status"] == "done"
+    recs = recs["items"]
     assert {r["id"][0] for r in recs} == {"A", "V"}
     best_quality = next(r for r in recs if r["category"] == "anime" and "品質最好" in r["kinds"])
     assert best_quality["tl_name"] == "A Model"

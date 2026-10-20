@@ -205,7 +205,7 @@ def test_rank_asr_skips_incomplete():
 
 @pytest.mark.parametrize("text, expected", [
     ('{"accuracy":8,"naturalness":7,"tone":6,"taiwan":9,"note":"ok"}', (8, 7, 6, 9)),
-    ('```json\n{"accuracy": 7.6, "naturalness": "6", "tone": 12, "taiwan": 0}\n```', (8, 6, 10, 1)),
+    ('```json\n{"accuracy": 7.6, "naturalness": "6", "tone": 10, "taiwan": 0}\n```', (8, 6, 10, 1)),
     ('評分如下：{"accuracy":5,"naturalness":5,"tone":5,"taiwan":5} 以上', (5, 5, 5, 5)),
 ])
 def test_parse_scores_tolerates_noise(text, expected):
@@ -213,7 +213,8 @@ def test_parse_scores_tolerates_noise(text, expected):
     assert tuple(s[c] for c in judge.CRITERIA) == expected
 
 
-@pytest.mark.parametrize("text", ["", "不知道", '{"accuracy":8}', '{"accuracy":"x","naturalness":1,"tone":1,"taiwan":1}'])
+@pytest.mark.parametrize("text", ["", "不知道", '{"accuracy":8}', '{"accuracy":"x","naturalness":1,"tone":1,"taiwan":1}',
+                                  '{"accuracy":85,"naturalness":70,"tone":60,"taiwan":90}'])  # 100-point scale
 def test_parse_scores_rejects_incomplete(text):
     assert judge.parse_scores(text) is None
 

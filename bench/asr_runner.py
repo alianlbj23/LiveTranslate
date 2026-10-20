@@ -50,14 +50,6 @@ def find_turbo_path() -> str | None:
     return None
 
 
-def _cache_key(cand: AsrCandidate):
-    if cand.engine_type == "whisper":
-        return find_turbo_path()
-    if cand.engine_type == "funasr":
-        return cand.funasr_model
-    return None
-
-
 def is_cached(cand: AsrCandidate, hub: str) -> bool:
     from model_manager import is_asr_cached
 
@@ -87,7 +79,9 @@ def build_worker_config(cand: AsrCandidate, settings: dict, config: dict) -> dic
     asr_cfg = config.get("asr", {})
     funasr_model = normalize_funasr_model_key(cand.funasr_model or settings.get("funasr_model"))
     if cand.engine_type == "whisper":
-        model_size = find_turbo_path() or settings.get("whisper_model_size") or asr_cfg.get("model_size")
+        model_size = find_turbo_path()
+        if not model_size:  # never measure another Whisper model under the turbo name
+            raise RuntimeError("找不到 Whisper large-v3-turbo 模型資料夾")
         display_name = "Whisper faster-whisper-large-v3-turbo"
         pad = settings.get("whisper_pad_seconds", asr_cfg.get("whisper_pad_seconds", 0.5))
     elif cand.engine_type == "funasr":
@@ -192,6 +186,12 @@ def displayed_text(text: str, label: str, seg_seconds: float, forced: str, hint_
     if not kept:
         return "", f"language:{dropped[0][1]}"
     return kept, (f"language-partial:{dropped[0][1]}" if dropped else None)
+
+
+def warm_up_filters(forced: str):
+    """Build the sentence splitter once (yasbd takes ~0.5 s the first time) so that cost
+    never lands on a timed sentence; the app also builds it once and keeps it."""
+    displayed_text("今日はいい天気ですね。明日も晴れるといいな", forced, 1.0, forced)
 
 
 def hint_missing_for(cand: AsrCandidate, forced: str) -> bool:

@@ -26,7 +26,12 @@ def _method(name):
 
 # ---------------------------------------------------------------- worker config
 
-def test_worker_config_has_exactly_the_keys_main_builds():
+@pytest.fixture
+def turbo(monkeypatch):
+    monkeypatch.setattr(asr_runner, "find_turbo_path", lambda: r"D:\models\faster-whisper-large-v3-turbo")
+
+
+def test_worker_config_has_exactly_the_keys_main_builds(turbo):
     fn = _method("_switch_asr_engine")
     keys = None
     for node in ast.walk(fn):
@@ -42,7 +47,7 @@ def test_worker_config_has_exactly_the_keys_main_builds():
         assert cfg["language"] == "ja" and cfg["hub"] == "hf" and cfg["beam_size"] == 1
 
 
-def test_worker_config_per_engine():
+def test_worker_config_per_engine(turbo):
     settings = {"hub": "hf", "asr_language": "ja", "sensevoice_pad_seconds": 0.4, "whisper_pad_seconds": 0.3}
     config = {"asr": {"compute_type": "float16"}}
     by_id = {c.id: asr_runner.build_worker_config(c, settings, config) for c in asr_runner.ASR_CANDIDATES}
@@ -50,6 +55,14 @@ def test_worker_config_per_engine():
     assert by_id["mlt-nano"]["model_size"] == "funasr-mlt-nano-2512"
     assert by_id["anime-whisper"]["pad_seconds"] is None
     assert by_id["whisper-turbo"]["pad_seconds"] == 0.3
+    assert by_id["whisper-turbo"]["model_size"].endswith("faster-whisper-large-v3-turbo")
+
+
+def test_missing_turbo_is_an_error_not_another_model(monkeypatch):
+    monkeypatch.setattr(asr_runner, "find_turbo_path", lambda: None)
+    with pytest.raises(RuntimeError, match="turbo"):
+        asr_runner.build_worker_config(asr_runner.CANDIDATES_BY_ID["whisper-turbo"],
+                                       {"whisper_model_size": "medium"}, {"asr": {}})
 
 
 # ---------------------------------------------------------------- translator arguments

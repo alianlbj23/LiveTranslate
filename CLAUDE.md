@@ -165,6 +165,15 @@ Continuous speech is processed incrementally to reduce latency (enabled by `incr
 - **Short segment merge**: Segments below `min_speech_duration` are NOT discarded — VAD does a soft-reset (`_is_speaking=False`) but keeps the buffer, which naturally merges with the next speech onset
 - **Trimmed segment handling**: `_was_trimmed` flag (set by `trim_front`) ensures interim ASR remainders are `force_flush()`ed instead of being dropped by min_speech check
 
+### Best-combination benchmark (bench/)
+
+Separate tool, never imported by the real-time app: launcher button 最佳組合評測 → `launcher/bench.ps1` (numbered menu) → `launcher/bench_run.py` (`python -I`, `apply_cache_env()` before torch, `__main__` guard for spawn) → `bench/cli.py`.
+- Data: `bench/datasets.py` fetches a seeded sample (SEED, strictly in candidate order; network failures stop instead of skipping) through the Hugging Face datasets-server `/rows` API into `bench_clips/<key>/` (16 kHz mono wav + txt + manifest.json); no `datasets` package
+- Stages: `bench/orchestrator.py` (resumable at sentence level via `bench/state.py` jsonl logs). Stage 1 ASR through `ASRClient` with `asr_runner.build_worker_config()` (same keys as main's worker_config) and CER on `displayed_text()` (copy of main's punctuation / noise / per-sentence language filters); stage 2 VAD thresholds with a fresh `VADProcessor` per run (only with `bench_clips/live/`); stage 3 translation alone and together with ASR (real-time replay), then cross judging (`bench/judge.py`, offsets aligned on shared items)
+- Copies of main.py logic are guarded by `tests/test_bench_asr.py` (AST comparison of worker_config keys and Translator kwargs, filter results compared with `LiveTranslateApp`); update both when changing those parts of main.py
+- `bench/settings_io.py` applies a recommendation only when LiveTranslate is closed: backup in `bench_results/settings_backups/`, changes only asr_engine / funasr_model / whisper_model_size / vad_threshold / active_model, plus `local_models.remember_selected()`
+- Tests: `LIVETRANSLATE_BENCH_DIR` and `bench.paths.SETTINGS_FILE` are sandboxed in tests/conftest.py
+
 ### Key Patterns
 
 - `torch` must be imported before PyQt6 to avoid DLL conflicts on Windows (PyTorch 2.9.0+ bug, see `main.py` and [pytorch#166628](https://github.com/pytorch/pytorch/issues/166628))

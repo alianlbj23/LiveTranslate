@@ -107,8 +107,15 @@ class RowsClient:
                 delay = min(delay * 2, 32.0)
         raise DownloadError(f"{last_error} after {self._retries + 1} attempts: {url}")
 
+    def _json(self, url, params=None):
+        resp = self._get(url, params)
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise DownloadError(f"not JSON from {url}: {resp.text[:120]!r}") from e
+
     def num_rows(self, hf_id, split) -> int:
-        data = self._get(f"{ROWS_API}/size", {"dataset": hf_id}).json()
+        data = self._json(f"{ROWS_API}/size", {"dataset": hf_id})
         for s in (data.get("size") or {}).get("splits") or []:
             if s.get("split") == split and isinstance(s.get("num_rows"), int):
                 return s["num_rows"]
@@ -116,14 +123,14 @@ class RowsClient:
 
     def revision(self, hf_id):
         try:
-            return self._get(f"{HUB_API}/{hf_id}").json().get("sha")
-        except (DownloadError, ValueError) as e:
+            return self._json(f"{HUB_API}/{hf_id}").get("sha")
+        except (DownloadError, AttributeError) as e:
             log.warning(f"Could not read the dataset revision of {hf_id}: {e}")
             return None
 
     def row(self, hf_id, split, offset) -> dict:
-        data = self._get(f"{ROWS_API}/rows", {"dataset": hf_id, "config": "default", "split": split,
-                                              "offset": offset, "length": 1}).json()
+        data = self._json(f"{ROWS_API}/rows", {"dataset": hf_id, "config": "default", "split": split,
+                                               "offset": offset, "length": 1})
         rows = data.get("rows") or []
         if not rows:
             raise DownloadError(f"{hf_id}: no row at offset {offset}")
@@ -180,7 +187,10 @@ def decode_to_16k(data: bytes) -> np.ndarray:
     if sr != SAMPLE_RATE:
         import librosa
 
-        mono = librosa.resample(mono, orig_sr=sr, target_sr=SAMPLE_RATE, res_type="soxr_hq")
+        try:
+            mono = librosa.resample(mono, orig_sr=sr, target_sr=SAMPLE_RATE, res_type="soxr_hq")
+        except Exception as e:  # librosa / soxr errors: a content problem of this clip
+            raise ValueError(f"cannot resample {sr} Hz audio: {e}") from e
     return np.asarray(mono, dtype=np.float32)
 
 
@@ -280,8 +290,11 @@ def download_dataset(key: str, client: RowsClient, n: int | None = None, progres
         import soundfile as sf
 
         cid = f"{row:06d}"
-        sf.write(str(out / f"{cid}.wav"), audio, SAMPLE_RATE, subtype="PCM_16")
-        (out / f"{cid}.txt").write_text(ref, encoding="utf-8")
+        try:
+            sf.write(str(out / f"{cid}.wav"), audio, SAMPLE_RATE, subtype="PCM_16")
+            (out / f"{cid}.txt").write_text(ref, encoding="utf-8")
+        except (OSError, RuntimeError) as e:  # disk full / no permission: stop, keep the progress
+            raise DownloadError(f"cannot write {out / cid}: {e}") from e
         entry = {"id": cid, "row": row, "duration": round(duration, 3), "ref": ref}
         (m["warmup"] if len(m["warmup"]) < WARMUP_CLIPS else m["clips"]).append(entry)
         done_rows.add(row)
