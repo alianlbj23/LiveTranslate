@@ -47,22 +47,22 @@ def test_header_uses_fluent_icon_buttons_with_tooltips(qapp):
 
 
 def test_toggle_buttons_keep_main_py_api(qapp):
-    """main.py syncs the tray menu through _ct_check / _topmost_check / _auto_scroll / _taskbar_check."""
+    """main.py syncs the tray menu through _ct_check / _topmost_check / _auto_scroll.
+    The Taskbar toggle was removed on request (2026-10-21): the overlay is always on the taskbar."""
     h = so.DragHandle()
     got = []
     h.click_through_toggled.connect(lambda v: got.append(("ct", v)))
     h.topmost_toggled.connect(lambda v: got.append(("top", v)))
     h.auto_scroll_toggled.connect(lambda v: got.append(("scroll", v)))
-    h.taskbar_toggled.connect(lambda v: got.append(("taskbar", v)))
-    for name in ("_ct_check", "_topmost_check", "_auto_scroll", "_taskbar_check"):
+    for name in ("_ct_check", "_topmost_check", "_auto_scroll"):
         assert isinstance(getattr(h, name), TransparentToggleToolButton), name
+    assert not hasattr(h, "_taskbar_check")
     assert h._ct_check.isChecked() is False and h._topmost_check.isChecked() is True
-    assert h.auto_scroll is True and h._taskbar_check.isChecked() is False
+    assert h.auto_scroll is True
     h._ct_check.setChecked(True)
     h._topmost_check.click()
     h._auto_scroll.click()
-    h._taskbar_check.setChecked(True)
-    assert got == [("ct", True), ("top", False), ("scroll", False), ("taskbar", True)]
+    assert got == [("ct", True), ("top", False), ("scroll", False)]
     assert h.auto_scroll is False
 
 

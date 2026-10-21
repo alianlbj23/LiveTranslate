@@ -2,14 +2,16 @@ import ctypes
 import logging
 import os
 import re
+import sys
 import time
+from ctypes import wintypes
 
 import psutil
 
 import system_stats
 from i18n import t, LANGUAGES
 from PyQt6.QtCore import QEvent, QPoint, QPropertyAnimation, QEasingCurve, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath
+from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -39,7 +41,18 @@ from qfluentwidgets import (
 log = logging.getLogger("LiveTranslate.Overlay")
 
 _GWL_EXSTYLE = -20
-_TYPE_MASK = Qt.WindowType.WindowType_Mask
+_GWL_STYLE = -16
+_WS_CAPTION = 0x00C00000
+_WS_SYSMENU = 0x00080000
+_WS_MINIMIZEBOX = 0x00020000
+_WM_NCCALCSIZE = 0x0083
+_SWP_FRAMECHANGED_ONLY = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020  # no size/move/z-order/activate
+_user32 = ctypes.windll.user32 if sys.platform == "win32" else None
+
+
+class _MSG(ctypes.Structure):
+    _fields_ = [("hWnd", wintypes.HWND), ("message", wintypes.UINT), ("wParam", wintypes.WPARAM),
+                ("lParam", wintypes.LPARAM), ("time", wintypes.DWORD), ("pt", wintypes.POINT)]
 _WS_EX_TRANSPARENT = 0x20
 
 # Translucent dark card: about 85 % opaque, 12 px corners; the header only tints the card
@@ -650,7 +663,6 @@ class DragHandle(QWidget):
     click_through_toggled = pyqtSignal(bool)
     topmost_toggled = pyqtSignal(bool)
     auto_scroll_toggled = pyqtSignal(bool)
-    taskbar_toggled = pyqtSignal(bool)
     target_language_changed = pyqtSignal(str)
     source_language_changed = pyqtSignal(str)
     model_changed = pyqtSignal(int)
@@ -784,10 +796,6 @@ class DragHandle(QWidget):
         self._auto_scroll = _icon_button(FIF.DOWN, t("auto_scroll"), toggle=True, checked=True)
         self._auto_scroll.toggled.connect(self.auto_scroll_toggled.emit)
         row2.addWidget(self._auto_scroll)
-
-        self._taskbar_check = _icon_button(FIF.TILES, t("taskbar"), toggle=True)
-        self._taskbar_check.toggled.connect(self.taskbar_toggled.emit)
-        row2.addWidget(self._taskbar_check)
 
         sep = VerticalSeparator()
         sep.setFixedHeight(18)
@@ -1041,12 +1049,6 @@ class SubtitleOverlay(QWidget):
         self._messages = {}
         self._max_messages = 50
         self._click_through = False
-        # Tool flag dropped so the minimized window has a taskbar button; put back on restore
-        self._tool_flag_after_restore = False
-        self._tool_flag_timer = QTimer(self)
-        self._tool_flag_timer.setSingleShot(True)
-        self._tool_flag_timer.setInterval(0)
-        self._tool_flag_timer.timeout.connect(self._drop_taskbar_button)
         self._last_tray_toggle = None
         self._height_before_compact = None
         self._mode_anim = None
@@ -1067,10 +1069,13 @@ class SubtitleOverlay(QWidget):
         self.update_asr_device_signal.connect(self._on_update_asr_device)
 
     def _setup_ui(self):
+        # A normal window (not Tool): it has a taskbar button from the start. Windows only
+        # iconifies this frameless window with the minimize-button hint.
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowMinimizeButtonHint
         )
         self.setWindowTitle("LiveTranslate")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -1111,7 +1116,6 @@ class SubtitleOverlay(QWidget):
         self._handle.subtitle_settings_requested.connect(self.subtitle_settings_requested.emit)
         self._handle.click_through_toggled.connect(self._set_click_through)
         self._handle.topmost_toggled.connect(self._set_topmost)
-        self._handle.taskbar_toggled.connect(self._set_taskbar)
         self._handle.target_language_changed.connect(self.target_language_changed.emit)
         self._handle.source_language_changed.connect(self.source_language_changed.emit)
         self._handle.model_changed.connect(self.model_switch_requested.emit)
@@ -1243,38 +1247,13 @@ class SubtitleOverlay(QWidget):
         self.setWindowFlags(flags)
         self.show()
 
-    def _set_taskbar(self, enabled: bool):
-        if self.isMinimized():
-            # Keep the taskbar button while minimized; the choice applies on restore
-            self._tool_flag_after_restore = not enabled
-            return
-        self._tool_flag_after_restore = False  # applied now, nothing left for a restore
-        flags = self.windowFlags() & ~_TYPE_MASK
-        if enabled:
-            flags |= Qt.WindowType.Window
-        else:
-            flags |= Qt.WindowType.Tool
-        self.setWindowFlags(flags)
-        self.show()
-
     def minimize_to_taskbar(self):
-        """Minimize to the Windows taskbar. A Tool window has no taskbar button, so while
-        the Taskbar toggle is off it is a normal window until restored. Windows only
-        iconifies this frameless window with the minimize-button hint and after it is shown
-        again with the new flags."""
+        """Minimize to the Windows taskbar (animated, see _add_window_animation)."""
         if self.isMinimized():
             return
         # This translucent (layered) window is drawn back at its old place by any repaint
         # while minimized, so painting stops until it is restored (see changeEvent)
         self.setUpdatesEnabled(False)
-        flags = self.windowFlags()
-        if (flags & _TYPE_MASK) == Qt.WindowType.Tool:
-            self._tool_flag_after_restore = True
-            flags = (flags & ~_TYPE_MASK) | Qt.WindowType.Window
-        flags |= Qt.WindowType.WindowMinimizeButtonHint
-        if flags != self.windowFlags():
-            self.setWindowFlags(flags)
-            self.show()
         self.showMinimized()
 
     def restore_window(self):
@@ -1304,22 +1283,37 @@ class SubtitleOverlay(QWidget):
         if event.type() != QEvent.Type.WindowStateChange:
             return
         if self.isMinimized():
-            # also minimized from the taskbar button (Taskbar toggle on): no repaints, see above
+            # also minimized from its taskbar button: no repaints, see minimize_to_taskbar
             self.setUpdatesEnabled(False)
             return
         if not self.updatesEnabled():
             self.setUpdatesEnabled(True)
-        if self._tool_flag_after_restore:
-            # Restored (taskbar click or tray): changing flags inside this event is unsafe
-            self._tool_flag_timer.start()
 
-    def _drop_taskbar_button(self):
-        if not self._tool_flag_after_restore or self.isMinimized():
-            return
-        self._tool_flag_after_restore = False
-        flags = self.windowFlags() & ~Qt.WindowType.WindowMinimizeButtonHint
-        self.setWindowFlags((flags & ~_TYPE_MASK) | Qt.WindowType.Tool)
-        self.show()
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._add_window_animation()
+
+    def _add_window_animation(self):
+        """Windows plays the minimize / restore animation only for windows with a caption and
+        a minimize box. Qt gives this frameless window neither and resets the style whenever
+        the flags change (top-most toggle), so they are added on every show; nativeEvent keeps
+        the caption from taking any room."""
+        if _user32 is None or QGuiApplication.platformName() != "windows":
+            return  # offscreen tests: winId() is not an HWND
+        hwnd = int(self.winId())
+        style = _user32.GetWindowLongW(hwnd, _GWL_STYLE)
+        wanted = style | _WS_CAPTION | _WS_SYSMENU | _WS_MINIMIZEBOX
+        if wanted != style:
+            _user32.SetWindowLongW(hwnd, _GWL_STYLE, wanted)
+            _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED_ONLY)
+
+    def nativeEvent(self, eventType, message):
+        # The whole window is client area: no system title bar from the caption style above.
+        # Do not call super() here: PyQt6 crashes on it (access violation).
+        msg = _MSG.from_address(int(message))
+        if msg.message == _WM_NCCALCSIZE and msg.wParam:
+            return True, 0
+        return False, 0
 
     def _set_click_through(self, enabled: bool):
         self._click_through = enabled

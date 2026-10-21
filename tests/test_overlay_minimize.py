@@ -1,7 +1,7 @@
-"""Overlay minimize (subtitle_overlay.py): a header button minimizes the window to the
-Windows taskbar, and a taskbar click, a left click on the tray icon or the tray menu
-brings it back. A Tool window has no taskbar button, so while the Taskbar toggle is off
-the window is a normal window only while it is minimized."""
+"""Overlay minimize (subtitle_overlay.py): the overlay is a normal taskbar window (no Tool flag,
+no Taskbar toggle). A header button minimizes it with the system animation, and a taskbar
+click, a left click on the tray icon or the tray menu brings it back."""
+import ctypes
 import os
 import re
 import sys
@@ -13,7 +13,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6 import sip  # noqa: E402
+from PyQt6.QtCore import QByteArray, Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 import subtitle_overlay as so  # noqa: E402
@@ -38,13 +39,14 @@ def ov(qapp):
     qapp.processEvents()
 
 
-def _is_tool(w) -> bool:
-    return (w.windowFlags() & MASK) == Qt.WindowType.Tool
-
-
 def _settle(qapp):
     for _ in range(3):
         qapp.processEvents()
+
+
+def _tray_click(ov):
+    ov._last_tray_toggle = None  # as if the previous click was long ago
+    ov.toggle_from_tray()
 
 
 def test_header_has_a_minimize_button(qapp):
@@ -56,129 +58,36 @@ def test_header_has_a_minimize_button(qapp):
     assert got == ["min"]
 
 
-def test_minimize_button_puts_the_window_on_the_taskbar(qapp, ov):
-    assert _is_tool(ov)  # no taskbar button by default
-    topmost = bool(ov.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+def test_overlay_always_has_a_taskbar_button(qapp, ov):
+    """Requested 2026-10-21: the app takes a taskbar slot as soon as it opens, no toggle."""
+    assert (ov.windowFlags() & MASK) == Qt.WindowType.Window  # a Tool window has no taskbar button
+    assert ov.windowFlags() & MIN_HINT
+    assert ov.windowFlags() & Qt.WindowType.FramelessWindowHint
+    assert not hasattr(ov._handle, "_taskbar_check")
+    assert not hasattr(so.DragHandle, "taskbar_toggled")
+    assert not hasattr(so.SubtitleOverlay, "_set_taskbar")
+
+
+def test_top_most_toggle_keeps_the_taskbar_button(qapp, ov):
+    ov._handle._topmost_check.setChecked(False)
+    _settle(qapp)
+    assert (ov.windowFlags() & MASK) == Qt.WindowType.Window and ov.windowFlags() & MIN_HINT
+    assert not ov.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+    ov._handle._topmost_check.setChecked(True)
+    _settle(qapp)
+    assert ov.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+
+
+def test_minimize_button_minimizes_and_restore_brings_it_back(qapp, ov):
+    geo = ov.geometry()
+    flags = ov.windowFlags()
     ov._handle._minimize_btn.click()
     _settle(qapp)
     assert ov.isMinimized() and ov.isVisible()
-    assert not _is_tool(ov), "a Tool window has no taskbar button to bring it back"
-    assert ov.windowFlags() & MIN_HINT, "Windows does not iconify a frameless window without it"
-    assert bool(ov.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == topmost
-
-
-def test_restored_from_the_taskbar_drops_the_taskbar_button_again(qapp, ov):
-    geo = ov.geometry()
-    ov.minimize_to_taskbar()
-    _settle(qapp)
     ov.showNormal()  # what a click on the taskbar button does
     _settle(qapp)
     assert not ov.isMinimized() and ov.isVisible()
-    assert _is_tool(ov) and not ov.windowFlags() & MIN_HINT
-    assert ov.windowFlags() & Qt.WindowType.FramelessWindowHint
-    assert ov.geometry() == geo
-
-
-def test_taskbar_toggle_on_keeps_the_taskbar_button_after_restore(qapp, ov):
-    ov._handle._taskbar_check.setChecked(True)
-    _settle(qapp)
-    ov.minimize_to_taskbar()
-    _settle(qapp)
-    assert ov.isMinimized()
-    ov.restore_window()
-    _settle(qapp)
-    assert not ov.isMinimized() and not _is_tool(ov)
-
-
-def test_taskbar_toggle_changed_while_minimized_applies_on_restore(qapp, ov):
-    ov.minimize_to_taskbar()
-    _settle(qapp)
-    ov._handle._taskbar_check.setChecked(True)  # e.g. from the tray menu
-    _settle(qapp)
-    assert ov.isMinimized(), "changing the toggle must not pop the window back up"
-    ov.restore_window()
-    _settle(qapp)
-    assert not _is_tool(ov)
-    # and back: turned off while minimized -> Tool again once restored
-    ov.minimize_to_taskbar()
-    _settle(qapp)
-    ov._handle._taskbar_check.setChecked(False)
-    _settle(qapp)
-    assert ov.isMinimized()
-    ov.restore_window()
-    _settle(qapp)
-    assert _is_tool(ov)
-
-
-def _tray_click(ov):
-    ov._last_tray_toggle = None  # as if the previous click was long ago
-    ov.toggle_from_tray()
-
-
-def test_tray_left_click_toggles(qapp, ov):
-    _tray_click(ov)
-    _settle(qapp)
-    assert ov.isMinimized()
-    _tray_click(ov)
-    _settle(qapp)
-    assert not ov.isMinimized() and ov.isVisible() and _is_tool(ov)
-
-
-def test_hidden_window_comes_back_from_the_tray(qapp, ov):
-    ov.hide()
-    _tray_click(ov)
-    _settle(qapp)
-    assert ov.isVisible() and not ov.isMinimized()
-    # hidden while minimized (tray menu "hide"), then shown again: not left minimized
-    ov.minimize_to_taskbar()
-    _settle(qapp)
-    ov.hide()
-    ov.restore_window()
-    _settle(qapp)
-    assert ov.isVisible() and not ov.isMinimized() and _is_tool(ov)
-
-
-def test_tray_double_click_toggles_once(qapp, ov):
-    _tray_click(ov)
-    ov.toggle_from_tray()  # second click of a double click (Qt may report it as another Trigger)
-    _settle(qapp)
-    assert ov.isMinimized()
-
-
-def test_taskbar_toggled_right_after_restore_wins(qapp, ov):
-    """The Tool flag goes back on a zero-delay timer after a restore; a Taskbar toggle in between wins."""
-    ov.minimize_to_taskbar()
-    _settle(qapp)
-    ov.showNormal()
-    ov._handle._taskbar_check.setChecked(True)  # before the timer fires
-    _settle(qapp)
-    assert not _is_tool(ov) and ov._handle._taskbar_check.isChecked()
-
-
-def test_minimizing_twice_needs_one_restore(qapp, ov):
-    ov.minimize_to_taskbar()
-    ov.minimize_to_taskbar()
-    _settle(qapp)
-    ov.restore_window()
-    _settle(qapp)
-    assert not ov.isMinimized() and _is_tool(ov)
-
-
-def test_tray_icon_click_and_menu_use_the_overlay_restore():
-    main = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "tray.activated.connect(" in main
-    assert "ActivationReason.Trigger" in main and "overlay.toggle_from_tray()" in main
-    toggle = main[main.index("def on_toggle_overlay"):main.index("overlay_toggle_action.triggered.connect")]
-    assert "overlay.restore_window()" in toggle  # a minimized and then hidden window is not shown minimized
-
-
-@pytest.mark.parametrize("lang", ["zh_TW", "zh", "en"])
-def test_texts_for_minimize_and_tray_click(lang):
-    text = (ROOT / "i18n" / f"{lang}.yaml").read_text(encoding="utf-8")
-    assert re.search(r"^ovl_tip_minimize: \"[^\"]+\"$", text, re.M)
-    hint = re.search(r"^hide_tray_hint: \"([^\"]+)\"$", text, re.M).group(1)
-    assert not re.search(r"右鍵|右键|Right-click", hint)  # a left click brings it back now
-    assert re.search(r"點|单击|Click", hint)
+    assert ov.windowFlags() == flags and ov.geometry() == geo
 
 
 def test_minimized_window_does_not_repaint(qapp, ov):
@@ -192,14 +101,104 @@ def test_minimized_window_does_not_repaint(qapp, ov):
     assert ov.updatesEnabled()
 
 
-def test_minimized_from_outside_does_not_repaint_either(qapp, ov):
-    """With the Taskbar toggle on, a click on the taskbar button minimizes the window without
-    the header button; the paint stop must still apply."""
-    ov._handle._taskbar_check.setChecked(True)
-    _settle(qapp)
-    ov.showMinimized()  # what Windows does on a taskbar click
+def test_minimized_from_the_taskbar_does_not_repaint_either(qapp, ov):
+    ov.showMinimized()  # what Windows does on a click on the taskbar button
     _settle(qapp)
     assert not ov.updatesEnabled()
     ov.showNormal()
     _settle(qapp)
     assert ov.updatesEnabled()
+
+
+def test_tray_left_click_toggles(qapp, ov):
+    _tray_click(ov)
+    _settle(qapp)
+    assert ov.isMinimized()
+    _tray_click(ov)
+    _settle(qapp)
+    assert not ov.isMinimized() and ov.isVisible()
+
+
+def test_tray_double_click_toggles_once(qapp, ov):
+    _tray_click(ov)
+    ov.toggle_from_tray()  # second click of a double click (Qt may report it as another Trigger)
+    _settle(qapp)
+    assert ov.isMinimized()
+
+
+def test_hidden_window_comes_back_from_the_tray(qapp, ov):
+    ov.hide()
+    _tray_click(ov)
+    _settle(qapp)
+    assert ov.isVisible() and not ov.isMinimized()
+    # hidden while minimized (tray menu "hide"), then shown again: not left minimized
+    ov.minimize_to_taskbar()
+    _settle(qapp)
+    ov.hide()
+    ov.restore_window()
+    _settle(qapp)
+    assert ov.isVisible() and not ov.isMinimized() and ov.updatesEnabled()
+
+
+def test_minimizing_twice_needs_one_restore(qapp, ov):
+    ov.minimize_to_taskbar()
+    ov.minimize_to_taskbar()
+    _settle(qapp)
+    ov.restore_window()
+    _settle(qapp)
+    assert not ov.isMinimized() and ov.updatesEnabled()
+
+
+class _MSG(ctypes.Structure):
+    _fields_ = [("hWnd", ctypes.c_void_p), ("message", ctypes.c_uint), ("wParam", ctypes.c_size_t),
+                ("lParam", ctypes.c_ssize_t), ("time", ctypes.c_uint), ("pt", ctypes.c_long * 2)]
+
+
+def _native(ov, message, wparam):
+    m = _MSG(None, message, wparam, 0, 0)
+    return ov.nativeEvent(QByteArray(b"windows_generic_MSG"), sip.voidptr(ctypes.addressof(m)))
+
+
+def test_caption_added_for_the_animation_takes_no_room(qapp, ov):
+    """Windows animates minimize / restore only for windows with a caption; the caption style
+    is added natively and WM_NCCALCSIZE makes the whole window client area."""
+    assert tuple(_native(ov, 0x0083, 1)) == (True, 0)  # WM_NCCALCSIZE
+    assert tuple(_native(ov, 0x0083, 0))[0] is False
+    assert tuple(_native(ov, 0x0200, 0))[0] is False  # WM_MOUSEMOVE: Qt handles it
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 window styles")
+def test_animation_styles_are_only_set_on_a_real_window(qapp, ov):
+    # offscreen platform: winId() is not an HWND, nothing may be written to it
+    calls = []
+    real = so._user32
+
+    class Spy:
+        def __getattr__(self, name):
+            calls.append(name)
+            return getattr(real, name)
+
+    so._user32 = Spy()
+    try:
+        ov._add_window_animation()
+    finally:
+        so._user32 = real
+    assert calls == []
+
+
+def test_tray_icon_click_and_menu_use_the_overlay_restore():
+    main = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "tray.activated.connect(" in main
+    assert "ActivationReason.Trigger" in main and "overlay.toggle_from_tray()" in main
+    toggle = main[main.index("def on_toggle_overlay"):main.index("overlay_toggle_action.triggered.connect")]
+    assert "overlay.restore_window()" in toggle  # a minimized and then hidden window is not shown minimized
+    assert "taskbar_action" not in main and "_taskbar_check" not in main
+
+
+@pytest.mark.parametrize("lang", ["zh_TW", "zh", "en"])
+def test_texts_for_minimize_and_tray_click(lang):
+    text = (ROOT / "i18n" / f"{lang}.yaml").read_text(encoding="utf-8")
+    assert re.search(r"^ovl_tip_minimize: \"[^\"]+\"$", text, re.M)
+    hint = re.search(r"^hide_tray_hint: \"([^\"]+)\"$", text, re.M).group(1)
+    assert not re.search(r"右鍵|右键|Right-click", hint)  # a left click brings it back now
+    assert re.search(r"點|单击|Click", hint)

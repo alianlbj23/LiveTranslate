@@ -2668,7 +2668,7 @@ def main():
     menu.addAction(log_action)
     menu.addSeparator()
 
-    # --- Overlay submenu (click-through, topmost, auto-scroll, taskbar) ---
+    # --- Overlay submenu (click-through, topmost, auto-scroll) ---
     overlay_menu = QMenu(t("tray_menu_overlay"))
 
     ct_action = QAction(t("click_through"), checkable=True)
@@ -2676,7 +2676,6 @@ def main():
     topmost_action.setChecked(True)
     autoscroll_action = QAction(t("auto_scroll"), checkable=True)
     autoscroll_action.setChecked(True)
-    taskbar_action = QAction(t("taskbar"), checkable=True)
 
     # Tray → overlay sync
     ct_action.toggled.connect(lambda v: overlay._handle._ct_check.setChecked(v))
@@ -2686,9 +2685,6 @@ def main():
     autoscroll_action.toggled.connect(
         lambda v: overlay._handle._auto_scroll.setChecked(v)
     )
-    taskbar_action.toggled.connect(
-        lambda v: overlay._handle._taskbar_check.setChecked(v)
-    )
 
     # Overlay → tray sync
     overlay._handle.click_through_toggled.connect(lambda v: ct_action.setChecked(v))
@@ -2696,12 +2692,10 @@ def main():
     overlay._handle.auto_scroll_toggled.connect(
         lambda v: autoscroll_action.setChecked(v)
     )
-    overlay._handle.taskbar_toggled.connect(lambda v: taskbar_action.setChecked(v))
 
     overlay_menu.addAction(ct_action)
     overlay_menu.addAction(topmost_action)
     overlay_menu.addAction(autoscroll_action)
-    overlay_menu.addAction(taskbar_action)
     menu.addMenu(overlay_menu)
 
     # --- Model submenu ---
