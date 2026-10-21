@@ -294,9 +294,21 @@ def test_judge_client_disables_thinking_and_retries_once():
     assert client.prompt_tokens == 200
 
 
-def test_judge_client_gives_up_after_errors():
-    chat = _FakeChat([RuntimeError("down"), RuntimeError("down")])
-    assert judge.JudgeClient(_entry(), client=chat).score("vtuber", "a", "b") is None
+def test_judge_client_gives_up_after_errors_and_keeps_the_reason():
+    chat = _FakeChat([RuntimeError("down"), RuntimeError("401 invalid api key")])
+    client = judge.JudgeClient(_entry(), client=chat)
+    assert client.score("vtuber", "a", "b") is None
+    assert "401 invalid api key" in client.last_error
+
+
+def test_vad_judge_retries_once_and_logs_answers_that_are_not_json(caplog):
+    """Review finding: VAD answers that were not JSON were dropped without any log."""
+    chat = _FakeChat(["我覺得沒問題", "還是沒問題", "{}", '{"hallucinated": [1], "missed": []}'])
+    client = judge.JudgeClient(_entry(), client=chat)
+    with caplog.at_level("WARNING"):
+        assert client.vad("連続稿", ["字幕"]) is None
+    assert "還是沒問題" in client.last_error and any("not the JSON" in r.message for r in caplog.records)
+    assert client.vad("連続稿", ["字幕"]) == {"hallucinated": [], "missed": []}
 
 
 def test_judge_prompt_is_blind():

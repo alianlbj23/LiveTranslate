@@ -60,6 +60,38 @@ _bench_paths.SETTINGS_FILE = _SANDBOX_DIR / "user_settings.json"
 _bench_paths.SELECTED_MODEL_FILE = _SANDBOX_DIR / "selected_model.txt"
 os.environ.setdefault("LIVETRANSLATE_BENCH_DIR", str(_SANDBOX_DIR / "bench"))
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_llm_servers(monkeypatch):
+    """A benchmark run unloads every local model; a test that reached the user's real
+    Ollama / LM Studio would empty their GPU. Real servers are refused and the test fails
+    afterwards, even when the code under test caught and logged the refusal."""
+    from bench import llm_servers
+
+    reached = []
+    real_ollama = llm_servers.Ollama
+
+    class GuardedOllama(real_ollama):
+        def __init__(self, root_url, http=None):
+            if http is None:
+                reached.append(f"Ollama({root_url})")
+                raise AssertionError(f"test reached the real Ollama at {root_url}")
+            super().__init__(root_url, http=http)
+
+    def refuse(name):
+        def call(*args, **kwargs):
+            reached.append(name)
+            raise AssertionError(f"test called the real llm_servers.{name}")
+        return call
+
+    monkeypatch.setattr(llm_servers, "Ollama", GuardedOllama)
+    for name in ("lmstudio_unload_all", "start_fast_ollama", "stop_tray_ollama", "stop_ollama"):
+        monkeypatch.setattr(llm_servers, name, refuse(name))
+    yield
+    assert not reached, f"test reached real LLM servers: {reached}; inject fakes (Deps / monkeypatch)"
+
 
 def pytest_sessionfinish(session, exitstatus):
     if _digest(_REAL_SETTINGS) != _REAL_DIGEST:

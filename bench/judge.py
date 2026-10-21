@@ -105,6 +105,9 @@ def vad_user_prompt(continuous: str, lines: list) -> str:
     return f"連續稿：\n{continuous}\n\n字幕行：\n{body}"
 
 
+_RETRY_SUFFIXES = ("", "\n只輸出 JSON，不要其他文字。")  # first try, then one stricter retry
+
+
 class JudgeClient:
     """OpenAI-compatible chat call with thinking disabled the same way the translator
     does it (thinking_style), temperature 0 and a fixed seed."""
@@ -113,8 +116,10 @@ class JudgeClient:
         from translator import make_openai_client, resolve_thinking_style, thinking_disable_body
 
         self.entry = entry
+        self.last_error = None  # why the latest failed call failed, for the task reason
         if client is None:
-            # no hidden retries: a failing judge is counted and stopped by the orchestrator
+            # no SDK retries: score() / vad() try once more themselves, and the
+            # orchestrator stops a judge that keeps failing
             client = make_openai_client(entry["api_base"], entry.get("api_key") or "none",
                                         entry.get("proxy", "none"), timeout=timeout).with_options(max_retries=0)
         self._client = client
@@ -139,29 +144,26 @@ class JudgeClient:
 
     def score(self, category: str, ja: str, translation: str):
         """Scores dict, or None after one retry (judge_fail)."""
-        user = tl_user_prompt(category, ja, translation)
-        for extra in ("", "\n只輸出 JSON，不要其他文字。"):
-            try:
-                answer = self.ask(TL_SYSTEM, user + extra)
-            except Exception as e:  # a failed judge call is counted as judge_fail
-                log.warning(f"Judge {self.entry.get('name')} call failed: {e}")
-                continue
-            scores = parse_scores(answer)
-            if scores:
-                return scores
-            log.warning(f"Judge {self.entry.get('name')} answer is not the JSON asked for: {answer[:120]!r}")
-        return None
+        return self._ask_parsed(TL_SYSTEM, tl_user_prompt(category, ja, translation), 200, parse_scores)
 
     def vad(self, continuous: str, lines: list):
-        user = vad_user_prompt(continuous, lines)
-        for extra in ("", "\n只輸出 JSON，不要其他文字。"):
+        """{"hallucinated", "missed"}, or None after one retry (a failed window)."""
+        return self._ask_parsed(VAD_SYSTEM, vad_user_prompt(continuous, lines), 400,
+                                lambda answer: parse_vad(answer, len(lines)))
+
+    def _ask_parsed(self, system, user, max_tokens, parse):
+        for extra in _RETRY_SUFFIXES:
             try:
-                result = parse_vad(self.ask(VAD_SYSTEM, user + extra, max_tokens=400), len(lines))
-            except Exception as e:  # counted as a failed window
-                log.warning(f"VAD judge call failed: {e}")
-                result = None
-            if result is not None:
+                answer = self.ask(system, user + extra, max_tokens=max_tokens)
+            except Exception as e:  # counted as a failed item by the orchestrator
+                self.last_error = f"{type(e).__name__}: {e}"[:200]
+                log.warning(f"Judge {self.entry.get('name')} call failed: {self.last_error}")
+                continue
+            result = parse(answer)
+            if result:
                 return result
+            self.last_error = f"回答不是規定的 JSON：{answer[:80]!r}"
+            log.warning(f"Judge {self.entry.get('name')} answer is not the JSON asked for: {answer[:120]!r}")
         return None
 
 

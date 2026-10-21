@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from bench import analysis, costs, datasets, judge as judge_mod, llm_servers, settings_io, state
+from bench import analysis, costs, datasets, judge as judge_mod, llm_servers, paths, settings_io, state
 from bench.asr_runner import ASR_CANDIDATES, CANDIDATES_BY_ID, DOWNLOAD_BYTES, is_cached
 from bench.orchestrator import Bench, Deps, describe_estimate, estimate_remaining, git_rev
 from bench.progress import fmt_duration
@@ -34,8 +34,9 @@ def _setup_logging():
         root.addHandler(h)
 
 
-def _attach_run_log(run_dir: Path):
-    fh = logging.FileHandler(run_dir / "bench.log", encoding="utf-8")
+def _attach_run_log(run_dir: Path, name: str = "bench.log"):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler(run_dir / name, encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(fh)
@@ -89,25 +90,48 @@ def cmd_download(con: Console, source_factory=None) -> int:
     except settings_io.SettingsError as e:
         log.warning(f"{e}; using the system proxy setting")
         settings = {}
+    log_path = paths.clips_dir() / "download.log"
+    fh = _attach_run_log(log_path.parent, log_path.name)
+    try:
+        with _proxy_env(settings.get("download_proxy", "system")):
+            return _download_all(con, source_factory, log_path)
+    finally:
+        _detach_run_log(fh)
+
+
+def _progress(k, n, target, skipped=0):
+    sys.stdout.write(f"\r  {n}/{target} 句" + (f"（略過 {skipped} 筆）" if skipped else ""))
+    sys.stdout.flush()
+
+
+def _download_all(con: Console, source_factory, log_path) -> int:
     short = []
-    with _proxy_env(settings.get("download_proxy", "system")):
-        for key, spec in datasets.DATASETS.items():
-            con.say(f"\n{spec['label']}")
-
-            def progress(k, n, target):
-                sys.stdout.write(f"\r  {n}/{target} 句")
-                sys.stdout.flush()
-
-            try:
-                source = (source_factory or datasets.make_source)(key)
-                m = datasets.download_dataset(key, source, progress=progress, info=lambda t: con.say(f"  {t}"))
-            except datasets.DownloadError as e:
-                log.error(f"Download of {key} stopped: {e}")
-                con.say("", f"  網路錯誤：{e}", "  已下載的部分會保留，稍後再選 1 會從中斷的地方繼續。")
-                return 1
-            con.say(f"\r  完成：{len(m['clips'])}/{spec['n']} 句（略過 {len(m['skipped'])} 筆不合格的資料）")
-            if len(m["clips"]) < spec["n"]:
-                short.append(f"{spec['label']} 只有 {len(m['clips'])}/{spec['n']} 句")
+    for key, spec in datasets.DATASETS.items():
+        con.say(f"\n{spec['label']}")
+        try:
+            source = (source_factory or datasets.make_source)(key)
+            m = datasets.download_dataset(key, source, progress=_progress, info=lambda t: con.say(f"  {t}"))
+        except datasets.NetworkError as e:
+            log.error(f"Download of {key} stopped: {e}")
+            con.say("", f"  網路錯誤：{e}", "  已下載的部分會保留，稍後再選 1 會從中斷的地方繼續。")
+            return 1
+        except datasets.DataError as e:
+            log.error(f"Download of {key} stopped: {e}")
+            con.say("", f"  資料集和預期的不同，重試也不會好：{e}",
+                    f"  如果資料集更新過，刪除 {datasets.manifest_path(key)} 後再選 1 重新抽樣；"
+                    f"其他情況請附上 {log_path} 回報問題。")
+            return 1
+        except datasets.DownloadError as e:  # DiskError
+            log.error(f"Download of {key} stopped: {e}")
+            con.say("", f"  寫入磁碟失敗：{e}", "  請確認磁碟空間和資料夾權限；已下載的部分會保留，之後再選 1 繼續。")
+            return 1
+        except Exception as e:  # e.g. a library missing after an update: no traceback, keep the log
+            log.exception(f"Download of {key} failed")
+            con.say("", f"  下載失敗：{type(e).__name__}: {e}", f"  詳細原因在 {log_path}。")
+            return 1
+        con.say(f"\r  完成：{len(m['clips'])}/{spec['n']} 句（略過 {len(m['skipped'])} 筆不合格的資料）")
+        if len(m["clips"]) < spec["n"]:
+            short.append(f"{spec['label']} 只有 {len(m['clips'])}/{spec['n']} 句")
     if short:
         con.say("", "注意：" + "；".join(short) + "。合格的句子不夠，評測會用現有的句子。")
     return 0

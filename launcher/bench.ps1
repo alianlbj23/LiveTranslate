@@ -44,7 +44,8 @@ function Show-BenchMenu {
         }
         $code = Invoke-BenchAction -Root $Root -Python $Python -Action $action
         if ($null -ne $code -and $code -ne 0 -and $code -ne 130) {
-            Write-Host "（評測程式結束代碼 $code，詳細原因見上面的訊息或 bench_results 裡的 bench.log）" -ForegroundColor Yellow
+            $logHint = if ($action -eq "download") { "bench_clips 裡的 download.log" } else { "bench_results 裡那次評測的 bench.log" }
+            Write-Host "（評測程式結束代碼 $code，詳細原因見上面的訊息或 $logHint）" -ForegroundColor Yellow
         }
         [void](Read-Host "按 Enter 回到評測選單")
     }

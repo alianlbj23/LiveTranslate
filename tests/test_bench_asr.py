@@ -205,6 +205,23 @@ def test_session_gives_up_after_two_deaths_and_load_failure_closes():
     assert _FakeClient.instances[0].closed and bad.client is None
 
 
+def test_session_never_keeps_two_workers_and_says_when_it_has_none():
+    """Loading twice must stop the first worker (an orphan holds GPU memory), and using a
+    session whose worker is gone must say so instead of a NoneType error."""
+    from asr_client import ASRWorkerExited
+
+    _FakeClient.instances.clear()
+    s = asr_runner.AsrSession(asr_runner.CANDIDATES_BY_ID["sensevoice"], {}, client_factory=lambda c: _FakeClient(c, {}))
+    with pytest.raises(ASRWorkerExited, match="not running"):
+        s.transcribe(np.zeros(160))
+    s.load()
+    s.load()
+    assert [c.closed for c in _FakeClient.instances] == [True, False]
+    s.close()
+    with pytest.raises(ASRWorkerExited, match="not running"):
+        s.transcribe(np.zeros(160))
+
+
 # ---------------------------------------------------------------- translation timing
 
 class _Clock:

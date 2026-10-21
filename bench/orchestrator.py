@@ -34,7 +34,7 @@ ASR_WARMUP = datasets.WARMUP_CLIPS
 FAIL_STREAK = 10          # this many failures in a row: the model / judge is broken, not slow
 APP_CHECK_EVERY = 10      # items between checks that LiveTranslate was not opened meanwhile
 TL_WORKERS = 8            # like the app's translation executor (Ollama itself runs 2 at a time)
-MAX_WORKER_ERRORS = 3
+MAX_WORKER_ERRORS = 3     # ASR errors in a row: the task stops, incomplete and unranked
 TOGETHER_RELEASE_PAD_S = 0.5
 DEFAULT_SECONDS = {  # per item, before any measurement
     "asr:sensevoice": 0.15, "asr:mlt-nano": 0.6, "asr:anime-whisper": 0.5, "asr:whisper-turbo": 0.35,
@@ -75,11 +75,14 @@ def _prevent_sleep(on: bool) -> bool:
 
 
 def _final(kind: str, record: dict) -> bool:
-    """A record that needs no retry (failed items are tried again on resume)."""
+    """A record that needs no retry when its task runs again. Failures under load
+    (together) are measurements themselves: replaying them alone would hide them."""
     if kind == "asr":
         return not record.get("error")
-    if kind in ("tl", "together"):
-        return bool(record.get("ok")) or record.get("error") == "asr_empty"
+    if kind == "together":
+        return True
+    if kind == "tl":
+        return bool(record.get("ok")) or record.get("error") == asr_runner.ASR_EMPTY
     if kind == "judge":
         return record.get("scores") is not None
     return True
@@ -367,7 +370,7 @@ class Bench:
         self.store.set_task(task_id, status="running", items_total=total,
                             attempts=self.store.task(task_id)["attempts"] + 1)
         ewma = Ewma()
-        errors = 0
+        errors = streak = 0
         session = None
         with gpu.VramSampler(self.vram) as sampler:
             try:
@@ -394,24 +397,23 @@ class Bench:
                             continue
                         try:
                             result, ms = session.transcribe(audio)
-                        except ASRWorkerError as e:  # the worker is alive: this sentence failed
+                        except Exception as e:  # this sentence failed: it counts as all wrong
                             errors += 1
-                            log.error(f"{cand.label} failed on {key}: {e}")
-                            self.store.append("asr", {**base, "raw": "", "display": "", "error": str(e)[:200],
+                            streak += 1
+                            alive = isinstance(e, ASRWorkerError) and e.recoverable
+                            log.error(f"{cand.label} {'failed' if alive else 'worker died'} on {key}: {e}")
+                            self.store.append("asr", {**base, "raw": "", "display": "",
+                                                      "error": (str(e) if alive else f"worker: {e}")[:200],
                                                       "ms": None})
-                            if errors >= MAX_WORKER_ERRORS:
+                            if streak >= MAX_WORKER_ERRORS:
                                 raise
+                            if not alive:  # start a fresh worker for the next sentence
+                                session.close()
+                                session = self._open_session(cand, task_id)
+                                if session is None:
+                                    return
                             continue
-                        except Exception as e:  # the worker died twice: start a fresh one
-                            errors += 1
-                            log.error(f"{cand.label} worker died on {key}: {e}")
-                            session.close()
-                            if errors >= MAX_WORKER_ERRORS:
-                                raise
-                            session = self._open_session(cand, task_id)
-                            if session is None:
-                                return
-                            continue
+                        streak = 0
                         raw = (result or {}).get("text", "") if result else ""
                         label = (result or {}).get("language", "") if result else ""
                         shown, reason = asr_runner.displayed_text(raw, label, clip.duration, self.forced, hint_missing)
@@ -474,6 +476,8 @@ class Bench:
                     if asr_id not in (self.store.frozen("top2", {}) or {}).get(rec["category"], []):
                         continue
                     try:
+                        if session.client is None:  # the worker died on an earlier recording
+                            session.load()
                         self._stage2_recording(session, cand, rec, rec_no, len(recordings), task_id, done, hint_missing)
                     except Exception as e:  # one recording failing does not stop the others
                         log.exception(f"Stage 2: {rec['path']} with {cand.label} failed")
@@ -588,7 +592,7 @@ class Bench:
                     if key in done:
                         continue
                     if not source:
-                        rec = {"ok": False, "text": "", "ttft_ms": None, "total_ms": None, "error": "asr_empty"}
+                        rec = {"ok": False, "text": "", "ttft_ms": None, "total_ms": None, "error": asr_runner.ASR_EMPTY}
                     else:
                         rec = tl_runner.translate_timed(translator, source)
                         if rec["ok"]:
@@ -651,46 +655,62 @@ class Bench:
         self._settle("stage 3 together")
 
     def _run_together(self, cand, m, entry, cats, n_clips, task_id):
+        label = f"{cand.label} + {m['name']}"
+        done = self._done("together", task_id)
+        # a category is replayed as a whole (its records are written together at its end)
+        todo = {cat: [c for c in self._clips(cat)[1][:n_clips] if f"{cat}/{c.id}" not in done] for cat in cats}
+        todo = {cat: clips for cat, clips in todo.items() if clips}
         hint_missing = asr_runner.hint_missing_for(cand, self.forced)
+        errors = {}
         session = None
         with gpu.VramSampler(self.vram) as sampler:
             try:
-                session = self._open_session(cand, task_id)
-                if session is None:
-                    self.store.append("together_meta", {"task": task_id, "asr": cand.id, "model": m["fp"],
-                                                        "status": "failed", "reason": "ASR 載入失敗"})
-                    return
-                self._load_llm(entry)
-                translator = self._translator(entry)
-                asr_runner.warm_up_filters(self.forced)
-                warm, _ = self._clips(cats[0]) if cats else ([], [])
-                for clip in warm[:ASR_WARMUP]:
-                    result, _ms = session.transcribe(self._audio(clip.wav))
-                    tl_runner.translate_timed(translator, (result or {}).get("text") or "テスト")
-                for cat in cats:
-                    clips = self._clips(cat)[1][:n_clips]
-                    done = self._done("together", task_id)
-                    todo = [c for c in clips if f"{cat}/{c.id}" not in done]
-                    if not todo:
-                        continue
-                    for rec in self._replay(session, translator, todo, hint_missing):
+                if todo:
+                    session = self._open_session(cand, task_id)
+                    if session is None:
+                        self.store.append("together_meta", {"task": task_id, "asr": cand.id, "model": m["fp"],
+                                                            "status": "failed", "reason": "ASR 載入失敗"})
+                        return
+                    self._load_llm(entry)
+                    translator = self._translator(entry)
+                    self._warm_up_together(session, translator, cats)
+                for cat, clips in todo.items():
+                    for rec in self._replay(session, translator, clips, hint_missing):
                         key = f"{cat}/{rec['clip']}"
+                        if not rec["ok"] and rec["error"] != asr_runner.ASR_EMPTY:
+                            errors[rec["error"]] = errors.get(rec["error"], 0) + 1
+                            log.warning(f"Together {label} failed on {key}: {rec['error']} {rec.get('detail') or ''}")
                         self.store.append("together", {"task": task_id, "key": key, "asr": cand.id,
                                                        "model": m["fp"], "category": cat, **rec})
             except Exception as e:  # this pair fails; others continue
-                log.exception(f"Together {cand.label} + {m['name']} failed")
+                log.exception(f"Together {label} failed")
                 self.store.append("together_meta", {"task": task_id, "asr": cand.id, "model": m["fp"],
                                                     "status": "failed", "reason": str(e)[:300],
                                                     "vram_peak_mb": sampler.peak_mb})
-                self._fail_task(task_id, e, f"{cand.label} + {m['name']}")
+                self._fail_task(task_id, e, label)
                 return
             finally:
                 if session:
                     session.close()
         self.store.append("together_meta", {"task": task_id, "asr": cand.id, "model": m["fp"], "status": "ok",
-                                            "vram_peak_mb": sampler.peak_mb, "vram_base_mb": self.baseline_mb})
+                                            "errors": errors, "vram_peak_mb": sampler.peak_mb,
+                                            "vram_base_mb": self.baseline_mb})
         self.store.set_task(task_id, status="done")
-        self.progress.finish(f"同時載入：{cand.label} + {m['name']} 完成")
+        summary = "、".join(f"{k} {v} 句" for k, v in errors.items())
+        self._say(f"同時載入：{label} 完成" + (f"（失敗：{summary}）" if summary else ""))
+
+    def _warm_up_together(self, session, translator, cats):
+        """Warm both models up; raises when every warm-up translation failed (typically
+        not enough memory with both loaded), instead of replaying into certain failures."""
+        asr_runner.warm_up_filters(self.forced)
+        warm, _ = self._clips(cats[0]) if cats else ([], [])
+        results = []
+        for clip in warm[:ASR_WARMUP]:
+            result, _ms = session.transcribe(self._audio(clip.wav))
+            results.append(tl_runner.translate_timed(translator, (result or {}).get("text") or "テスト"))
+        if results and not any(r["ok"] for r in results):
+            last = results[-1]
+            raise RuntimeError(f"暖機翻譯全部失敗：{last['error']} {last.get('detail') or ''}".strip())
 
     def _replay(self, session, translator, clips, hint_missing):
         """Real-time replay: clip i is handed over when it would have finished playing
@@ -723,18 +743,20 @@ class Bench:
                 label = (result or {}).get("language", "") if result else ""
                 shown, _reason = asr_runner.displayed_text(raw, label, clip.duration, self.forced, hint_missing)
                 base = {"clip": clip.id, "queue_ms": max(0.0, (start - released) * 1000), "asr_ms": asr_ms,
-                        "text": shown}
+                        "source": shown}
                 jobs.append((base, pool.submit(timed, shown, released) if shown else None))
                 # no time-remaining estimate here: rereading the logs would delay the next ASR
                 self.progress.show("階段 3/3 同時載入", f"第 {i + 1}/{len(clips)} 句", i + 1, len(clips), asr_ms, None)
             out = []
             for base, fut in jobs:
                 if fut is None:
-                    out.append({**base, "ok": False, "error": "asr_empty", "ttft_ms": None, "tl_ms": None, "e2e_ms": None})
+                    out.append({**base, "ok": False, "error": asr_runner.ASR_EMPTY, "ttft_ms": None, "tl_ms": None,
+                                "e2e_ms": None})
                     continue
                 res, e2e_s = fut.result()
-                out.append({**base, "ok": res["ok"], "error": res["error"], "ttft_ms": res["ttft_ms"],
-                            "tl_ms": res["total_ms"], "e2e_ms": e2e_s * 1000, "translation": res["text"]})
+                out.append({**base, "ok": res["ok"], "error": res["error"], "detail": res.get("detail"),
+                            "ttft_ms": res["ttft_ms"], "tl_ms": res["total_ms"], "e2e_ms": e2e_s * 1000,
+                            "translation": res["text"]})
             return out
         finally:
             pool.shutdown(wait=True)
@@ -769,9 +791,8 @@ class Bench:
             if status not in ("done", "failed"):
                 self._judge_translations(client, entry, jfp, assignment, task_id)
             if vad_pending and self.store.task(task_id)["status"] != "failed":
-                self._judge_vad(client, entry)
-                vad_pending = False
-        if vad_pending:
+                vad_pending = not self._judge_vad(client, entry)  # stopped: the next judge takes over
+        if vad_pending and self.store.task("s2judge")["status"] != "failed":
             self._fail_task("s2judge", "沒有可用的評審，第 2 階段的結果沒有評分", "語音偵測評分")
         self._unload_llms()
         self._settle("judges")
@@ -810,18 +831,26 @@ class Bench:
                 cal_fail += item.startswith("cal/")
             else:
                 streak = 0
-            if cal_fail == len(judge_mod.CALIBRATION) or streak >= FAIL_STREAK:
-                why = "校準題全部無法評分" if cal_fail == len(judge_mod.CALIBRATION) else f"連續 {FAIL_STREAK} 題無法評分"
-                self._fail_task(task_id, f"{why}（回答不是規定的 JSON，或模型沒有回應）", f"評審 {entry.get('name')}")
+            why = None
+            if cal_fail == len(judge_mod.CALIBRATION):
+                why = "校準題全部無法評分"
+            elif streak >= FAIL_STREAK:
+                why = f"連續 {FAIL_STREAK} 題無法評分"
+            if why:
+                self._fail_task(task_id, f"{why}（{_judge_error(client)}）", f"評審 {entry.get('name')}")
                 return
         self.store.set_task(task_id, status="done", items_done=total)
         self._say(f"評審 {entry.get('name')} 完成")
 
-    def _judge_vad(self, client, entry):
+    def _judge_vad(self, client, entry) -> bool:
+        """Judge every (ASR, recording, threshold) not fully judged yet. False when the
+        judge failed FAIL_STREAK windows in a row (s2judge is marked failed)."""
         raws = self.store.read("vad_raw")
         continuous = {(r["asr"], r["recording"]): r for r in raws if r.get("threshold") is None}
-        done = {r["key"] for r in self.store.read("vad")}
+        latest = {r["key"]: r for r in self.store.read("vad")}
+        done = {k for k, r in latest.items() if r.get("judged_windows") == r.get("windows")}
         todo = [r for r in raws if r.get("threshold") is not None]
+        streak = 0
         for n, r in enumerate(todo, 1):
             key = f"{r['asr']}/{r['recording']}/{r['threshold']}"
             if key in done:
@@ -836,7 +865,13 @@ class Bench:
                 lines = [x["text"] for x in vad_runner.lines_in_window(r["lines"], w["start"], w["end"])]
                 result = client.vad(w["text"], lines)
                 if result is None:
+                    streak += 1
+                    if streak >= FAIL_STREAK:
+                        self._fail_task("s2judge", f"連續 {FAIL_STREAK} 段無法評分（{_judge_error(client)}）",
+                                        f"評審 {entry.get('name')} 的語音偵測評分")
+                        return False
                     continue
+                streak = 0
                 judged += 1
                 judged_minutes += (w["end"] - w["start"]) / 60
                 hall += len(result["hallucinated"])
@@ -847,7 +882,13 @@ class Bench:
                                       "segments": r["segments"], "speech_s": r["speech_s"], "hallucinated": hall,
                                       "missed": missed, "judged_windows": judged})
             self.progress.show(f"評審｜{entry.get('name')}", "語音偵測", n, len(todo), None, self._remaining_estimate())
-        self.store.set_task("s2judge", status="done")
+        self.store.set_task("s2judge", status="done", reason=None)
+        return True
+
+
+def _judge_error(client) -> str:
+    """The judge's last error, for task reasons (the console shows each one as it happens)."""
+    return getattr(client, "last_error", None) or "回答不是規定的 JSON，或模型沒有回應"
 
 
 def _warmup_sentences():

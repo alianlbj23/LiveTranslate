@@ -10,13 +10,16 @@ import logging
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from bench import paths
 
 log = logging.getLogger("LiveTranslate.Bench.ASR")
 
 TURBO_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+ASR_EMPTY = "asr_empty"  # error of a translation record whose ASR showed nothing (not a model failure)
 
 
 @dataclass(frozen=True)
@@ -209,17 +212,16 @@ def hint_missing_for(cand: AsrCandidate, forced: str) -> bool:
 # ---------------------------------------------------------------- session
 
 
-@dataclass
+@dataclass(eq=False)
 class AsrSession:
-    """One loaded ASR worker. `client_factory(config)` builds the client (ASRClient in
-    real runs, a fake in tests)."""
+    """One ASR worker: load() starts it, close() stops it (and may be called again).
+    `client_factory(config)` builds the client (ASRClient in real runs, a fake in tests)."""
     cand: AsrCandidate
     config: dict
-    client_factory: object = None
-    client: object = None
+    client_factory: Callable[[dict], Any] | None = None
+    client: Any = None
     load_s: float = 0.0
     restarts: int = 0
-    errors: list = field(default_factory=list)
 
     def _new_client(self):
         if self.client_factory is not None:
@@ -229,6 +231,7 @@ class AsrSession:
         return ASRClient(self.config, ready_timeout=300.0, request_timeout=60.0)
 
     def load(self):
+        self.close()  # never leave a second worker running
         t0 = time.perf_counter()
         self.client = self._new_client()
         try:
@@ -241,16 +244,17 @@ class AsrSession:
         return self.load_s
 
     def transcribe(self, audio):
-        """(result dict or None, ms). A dead worker is restarted once per call."""
+        """(result dict or None, ms). A dead or timed-out worker is restarted once per call."""
         from asr_client import ASRWorkerExited, ASRWorkerTimeout
 
+        if self.client is None:
+            raise ASRWorkerExited(f"{self.cand.label} worker is not running")
         for attempt in (1, 2):
             t0 = time.perf_counter()
             try:
                 result = self.client.transcribe(audio)
                 return result, (time.perf_counter() - t0) * 1000
             except (ASRWorkerExited, ASRWorkerTimeout) as e:
-                self.errors.append(f"{type(e).__name__}: {e}")
                 log.warning(f"{self.cand.label} worker failed ({e}); restarting")
                 self.close()
                 if attempt == 2:

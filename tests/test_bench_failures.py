@@ -103,6 +103,92 @@ def test_vad_judging_failures_are_not_shown_as_zero_errors(world, recording):
     assert "評審失敗" in html and "沒有自己的錄音" not in html
 
 
+def _vad_deps(world, judge_factory):
+    deps = _deps(world)
+    deps.judge_factory = judge_factory
+    deps.vad_factory = _Vad
+    deps.load_audio = _load_audio
+    return deps
+
+
+def _as_cmd_resume(store):
+    """What cli.cmd_resume does before running again: judge tasks back to pending."""
+    for t in store.state["tasks"]:
+        if t["id"].startswith("s3judge/") or t["id"] == "s2judge":
+            store.set_task(t["id"], status="pending", reason=None)
+    store.state["status"] = "running"
+    store.save()
+
+
+def test_unjudged_vad_windows_are_judged_again_on_resume(world, recording):
+    """Review finding: VAD records whose windows all failed counted as done, so a resume
+    never judged them again and the run had no VAD result for good."""
+    class NoVadJudge(FakeJudge):
+        def vad(self, continuous, lines):
+            return None
+
+    store = _run(RunStore.create(_plan(world, stages=[1, 2, 3], recordings=[recording])), _vad_deps(world, NoVadJudge))
+    assert analysis.best_vad_thresholds(store) == {}
+    _as_cmd_resume(store)
+    store = _run(store, _vad_deps(world, FakeJudge))
+    latest = analysis._latest(store.read("vad"), ("asr", "threshold", "recording"))
+    assert latest and all(r["judged_windows"] == r["windows"] > 0 for r in latest)
+    assert analysis.best_vad_thresholds(store)
+
+
+def test_vad_judge_that_never_answers_is_stopped_and_the_next_one_takes_over(world, recording, monkeypatch):
+    from bench import orchestrator
+
+    monkeypatch.setattr(orchestrator, "FAIL_STREAK", 2)
+    calls = {"A Model": 0, "B Model": 0}
+
+    class NoVadJudge(FakeJudge):
+        def __init__(self, entry):
+            super().__init__(entry)
+            self.name = entry["name"]
+            self.last_error = "AuthenticationError: 401 invalid api key"
+
+        def vad(self, continuous, lines):
+            calls[self.name] += 1
+            return None
+
+    store = _run(RunStore.create(_plan(world, stages=[1, 2, 3], recordings=[recording])), _vad_deps(world, NoVadJudge))
+    assert calls == {"A Model": 2, "B Model": 2}
+    task = store.task("s2judge")
+    assert task["status"] == "failed" and "連續 2" in task["reason"] and "401 invalid api key" in task["reason"]
+
+
+def test_stage2_starts_a_fresh_worker_after_one_died_on_a_recording(world, recording):
+    """Review finding: after the worker died on one recording the session had no client,
+    and every later recording failed with "'NoneType' object has no attribute"."""
+    import soundfile as sf
+    from asr_client import ASRWorkerExited
+
+    bad_path = world["dir"] / "bench_clips" / "live" / "bad.wav"
+    sf.write(str(bad_path), np.zeros(16000 * 4, dtype=np.float32), 16000)
+    bad = {"path": str(bad_path), "category": "vtuber", "minutes": 4 / 60}
+
+    class DiesOnBad(FakeASR):
+        def transcribe(self, audio):
+            if float(np.mean(audio)) > 0.4:
+                raise ASRWorkerExited("worker exited")
+            return super().transcribe(audio)
+
+    def load(path):
+        return np.full(16000, 0.5, dtype=np.float32) if str(path).endswith("bad.wav") else _load_audio(path)
+
+    deps = _deps(world)
+    deps.asr_client_factory = lambda cfg: DiesOnBad(cfg, world["by_id"])
+    deps.vad_factory = _Vad
+    deps.load_audio = load
+    store = _run(RunStore.create(_plan(world, stages=[1, 2], recordings=[bad, recording])), deps)
+    good = [r for r in store.read("vad_raw") if r["recording"] == recording["path"]]
+    assert {r["asr"] for r in good} == set(store.frozen("top2")["vtuber"])
+    for asr in store.frozen("top2")["vtuber"]:
+        task = store.task(f"s2asr/{asr}")
+        assert task["status"] == "failed" and "bad.wav" in task["reason"] and "NoneType" not in task["reason"]
+
+
 def test_vad_is_judged_by_the_first_judge_that_loads(world, recording):
     class FirstJudgeBroken(FakeJudge):
         def __init__(self, entry):
@@ -147,6 +233,87 @@ def test_worker_error_does_not_leave_a_second_model_loaded(world):
     assert live["max"] == 1 and live["n"] == 0
     errors = [r for r in store.read("asr") if r.get("error")]
     assert len(errors) == 1 and "CUDA error" in errors[0]["error"]
+
+
+def _counting_asr(world, fail):
+    """FakeASR whose transcribe call number n raises fail(n) (None: answer normally).
+    Calls 1-3 are the warm-up, 4 the first sentence. Tracks live workers."""
+    stats = {"calls": 0, "starts": 0, "live": 0, "max_live": 0}
+
+    class Counting(FakeASR):
+        def start(self):
+            stats["starts"] += 1
+            stats["live"] += 1
+            stats["max_live"] = max(stats["max_live"], stats["live"])
+
+        def transcribe(self, audio):
+            stats["calls"] += 1
+            error = fail(stats["calls"])
+            if error is not None:
+                raise error
+            return super().transcribe(audio)
+
+        def shutdown(self):
+            stats["live"] -= 1
+
+    deps = _deps(world)
+    deps.asr_client_factory = lambda cfg: Counting(cfg, world["by_id"])
+    return deps, stats
+
+
+@pytest.mark.parametrize("failure", ["exited twice", "broken pipe"])
+def test_sentence_the_worker_died_on_is_recorded_and_the_model_still_ranked(world, failure):
+    """Review finding: when the worker died on a sentence (twice in a row, or with an
+    error the session does not restart for) nothing was recorded. The ASR then had only
+    n-1 of n sentences, was left out of the rankings, and a resume never retried it."""
+    from asr_client import ASRWorkerExited
+
+    def fail(n):
+        if failure == "exited twice" and n in (5, 6):  # 6: the session's retry on a new worker
+            return ASRWorkerExited("worker exited")
+        if failure == "broken pipe" and n == 5:
+            return BrokenPipeError("pipe closed")
+        return None
+
+    deps, stats = _counting_asr(world, fail)
+    store = _run(RunStore.create(_plan(world, asr=["sensevoice"], stages=[1])), deps)
+    assert {r["key"] for r in store.read("asr")} == {f"{ds}/{i:06d}" for ds, n in world["counts"].items()
+                                                     for i in range(3, 3 + n)}
+    errors = [r for r in store.read("asr") if r.get("error")]
+    assert len(errors) == 1 and errors[0]["key"] == "anime/000004"
+    assert stats["max_live"] == 1 and stats["live"] == 0
+    assert analysis.asr_table(store)["anime"]["sensevoice"]["complete"] is True
+    assert analysis.asr_rankings(store)["anime"] == ["sensevoice"]
+
+
+def test_scattered_asr_errors_keep_the_model_but_errors_in_a_row_stop_it(world):
+    """MAX_WORKER_ERRORS counts errors in a row (like FAIL_STREAK and main.py): three
+    scattered single-sentence errors out of ten must not drop the whole ASR."""
+    from asr_client import ASRWorkerError
+
+    def failing_on(calls):
+        return lambda n: ASRWorkerError({"message": "bad input"}) if n in calls else None
+
+    deps, _stats = _counting_asr(world, failing_on({5, 7, 9}))
+    store = _run(RunStore.create(_plan(world, asr=["sensevoice"], stages=[1])), deps)
+    assert store.task("s1/sensevoice")["status"] == "done"
+    assert analysis.asr_table(store)["anime"]["sensevoice"]["complete"] is True
+
+    deps, _stats = _counting_asr(world, failing_on({5, 6, 7}))
+    store = _run(RunStore.create(_plan(world, asr=["sensevoice"], stages=[1])), deps)
+    assert store.task("s1/sensevoice")["status"] == "failed"
+    assert analysis.asr_table(store)["anime"]["sensevoice"]["complete"] is False
+
+
+def test_unrecoverable_worker_error_starts_a_fresh_worker(world):
+    from asr_client import ASRWorkerError
+
+    deps, stats = _counting_asr(
+        world, lambda n: ASRWorkerError({"message": "CUDA context lost", "recoverable": False}) if n == 5 else None)
+    store = _run(RunStore.create(_plan(world, asr=["sensevoice"], stages=[1])), deps)
+    assert stats["starts"] == 2 and stats["max_live"] == 1 and stats["live"] == 0
+    assert [r["key"] for r in store.read("asr") if r.get("error")] == ["anime/000004"]
+    assert store.task("s1/sensevoice")["status"] == "done"
 
 
 # ---------------------------------------------------------------- C5 too few clips
@@ -217,7 +384,8 @@ def test_unexpected_error_marks_the_run_and_cli_points_to_the_log(world, monkeyp
     monkeypatch.setattr(Bench, "stage1", boom)
     out = []
     monkeypatch.setattr(settings_io, "find_running_app", lambda: [])
-    code = cli._run(cli.Console(input_fn=lambda p: "", print_fn=out.append), store, SETTINGS, CONFIG)
+    code = cli._run(cli.Console(input_fn=lambda p: "", print_fn=out.append), store, SETTINGS, CONFIG,
+                    deps=_deps(world))
     assert code == 1
     again = RunStore(store.dir)
     assert again.state["status"] == "error" and "disk full" in again.state["error"]
@@ -304,6 +472,64 @@ def test_failures_while_loaded_together_count_in_latency(world):
     rows = analysis.combos(store)["anime"]
     assert rows and all(not c["recommended"] for c in rows)
     assert all(c["together_fail_rate"] == 1.0 for c in rows)
+
+
+class _FailsUnderLoad(FakeTranslator):
+    """Translations on the replay pool fail (the warm-up on the main thread works)."""
+
+    def translate_iter(self, text, source_language="ja"):
+        import threading
+
+        if threading.current_thread().name.startswith("bench-tl"):
+            raise TimeoutError("busy GPU")
+        yield from super().translate_iter(text, source_language)
+
+
+def _one_model_plan(world, **kw):
+    return _plan(world, tl_models=_plan(world)["tl_models"][:1], judges=[FP["A Model"]], **kw)
+
+
+def test_failed_together_sentences_are_not_remeasured_alone_on_resume(world):
+    """Review finding: a resume replayed only the sentences that had failed under load,
+    now without the queue in front of them, and the easy success replaced the failure."""
+    store = _run(RunStore.create(_one_model_plan(world)), _deps(world, translator=lambda e, s, c: _FailsUnderLoad(e)))
+    before = store.read("together")
+    assert before and not any(r["ok"] for r in before)
+    store.set_task(before[0]["task"], status="pending")  # as if stopped during its last category
+    store.state["status"] = "running"
+    store.save()
+    store = _run(store, _deps(world))
+    assert len(store.read("together")) == len(before)
+
+
+def test_together_failures_keep_their_reason(world, caplog):
+    deps = _deps(world, translator=lambda e, s, c: _FailsUnderLoad(e))
+    with caplog.at_level("WARNING"):
+        store = _run(RunStore.create(_one_model_plan(world)), deps)
+    together = store.read("together")
+    assert together and all(r["error"] == "timeout" and "busy GPU" in r["detail"] for r in together)
+    assert any("busy GPU" in r.message for r in caplog.records if "Together" in r.message)
+    meta = [m for m in store.read("together_meta") if m["status"] == "ok"]
+    assert meta and all(m["errors"] == {"timeout": sum(r["task"] == m["task"] for r in together)} for m in meta)
+    assert "失敗：timeout 4 句" in deps.out.getvalue()  # SenseVoice: 2 categories x 2 sentences
+
+
+def test_pair_whose_warm_up_translations_all_fail_is_marked_failed(world):
+    class NoMemory:
+        def translate_iter(self, text, source_language="ja"):
+            raise RuntimeError("model requires more system memory")
+            yield  # pragma: no cover
+
+    made = {"n": 0}
+
+    def factory(entry, s, c):  # the model works alone (stage 3 translation), not next to the ASR
+        made["n"] += 1
+        return FakeTranslator(entry) if made["n"] == 1 else NoMemory()
+
+    store = _run(RunStore.create(_one_model_plan(world)), _deps(world, translator=factory))
+    tog = [t for t in store.state["tasks"] if t["id"].startswith("s3tog/")]
+    assert tog and all(t["status"] == "failed" and "requires more system memory" in t["reason"] for t in tog)
+    assert not store.read("together")
 
 
 # ---------------------------------------------------------------- H7 unfinished runs

@@ -1,32 +1,45 @@
 """Turn the raw result logs of a run into tables, rankings, combinations and
 recommendations. Used between stages (top-2 ASR) and by the report.
 
-Record kinds (results/<kind>.jsonl), written by bench.orchestrator:
-  asr            one clip through one ASR (raw text, displayed text, ms; "error" when the
-                 ASR failed on it, "skip" when the clip itself could not be read)
-  asr_meta       stage 1 only: per ASR status, load time, VRAM peak
-  vad_raw / vad  stage 2: segments per threshold, then the judged error counts
-  tl             one sentence through one translation model (alone)
-  tl_meta        per translation model: status, load time, error counts
-  together       one sentence, ASR + translation loaded together, replayed in real time
-  together_meta  per (ASR, model): status, VRAM peak
-  judge          one judge score for one item (translation or calibration)
+Record kinds (results/<kind>.jsonl), written by bench.orchestrator; every record has
+"task" and "key" (the item inside the task):
+  asr            one clip through one ASR: asr, dataset, clip, ref, duration, raw, label,
+                 display (what the app would show), reason (why a filter dropped text),
+                 ms; "error" when the ASR failed on it (counts as all wrong), "skip" when
+                 the clip itself could not be read (not counted)
+  asr_meta       stage 1 only, per ASR: status ok / failed / incomplete, reason, load_s,
+                 errors, vram_peak_mb, vram_base_mb
+  vad_raw        stage 2, per (ASR, recording, threshold): lines, segments, speech_s,
+                 minutes; threshold None = the continuous reference (windows)
+  vad            the judged vad_raw: hallucinated, missed, windows, judged_windows,
+                 judged_minutes
+  tl             one sentence through one translation model alone: model, category,
+                 clip, ref, source (the best ASR's text), ok, text (the translation),
+                 ttft_ms, total_ms, error, detail
+  tl_meta        per translation model: status, reason, load_s, errors, vram_peak_mb
+  together       one sentence with ASR + translation loaded together, replayed in real
+                 time: asr, model, category, clip, source (this ASR's text), translation,
+                 ok, error, detail, queue_ms, asr_ms, ttft_ms, tl_ms, e2e_ms
+  together_meta  per (ASR, model): status, reason, errors, vram_peak_mb
+  judge          one judge score for one item (translation or calibration): judge,
+                 item, candidate, category, scores (None = the judge failed), self
 The latest record per item wins (a resume may redo failed items)."""
 from statistics import mean
 
+from bench import asr_runner, scoring
 from bench import judge as judge_mod
-from bench import scoring
 from bench.textnorm import clip_errors
 
 CATEGORIES = ("anime", "vtuber")
 CATEGORY_LABELS = {"anime": "動畫", "vtuber": "VTuber"}
 MIN_JUDGE_COVERAGE = 0.8
+DEFAULT_TL_TIMEOUT_S = 10.0
 
 
 def _on_scale(score: float) -> float:
-    """Aligned scores stay on the judges' 1-10 scale."""
+    """Subtracting a judge offset can push a score past 1 or 10; clamp so Q stays on the
+    1-10 scale that the composite's q = (Q - 1) / 9 assumes."""
     return max(1.0, min(10.0, score))
-DEFAULT_TL_TIMEOUT_S = 10.0
 
 
 def _latest(records, key_fields):
@@ -229,7 +242,7 @@ def together_table(store) -> dict:
         groups.setdefault((r["asr"], r["model"], r["category"]), []).append(r)
     out = {}
     for key, recs in groups.items():
-        tried = [r for r in recs if r.get("error") != "asr_empty"]
+        tried = [r for r in recs if r.get("error") != asr_runner.ASR_EMPTY]
         ok = [r for r in tried if r.get("ok")]
         e2e = [r["e2e_ms"] if r.get("ok") else timeout_ms + (r.get("asr_ms") or 0) for r in tried]
         m = meta.get((key[0], key[1]), {})

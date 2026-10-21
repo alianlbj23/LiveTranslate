@@ -3,7 +3,10 @@ datasets' parquet files. No network: real parquet files in a temp folder stand i
 Hugging Face Hub (same reading code, local file opener)."""
 import io
 import json
+import threading
+import time
 
+import httpx
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -55,18 +58,20 @@ def _flac(seconds, sr=44100, channels=2):
 AUDIO_TYPE = pa.struct([("bytes", pa.binary()), ("path", pa.string())])
 
 
-def _write_split(folder, split, files=2, rows_per_file=30, group=10, durations=None, texts=None):
+def _write_split(folder, split, files=2, rows_per_file=30, group=10, durations=None, texts=None, raw=None):
     """Parquet files shaped like the Hub datasets (audio struct + transcription, small
-    row groups). Row numbers run across the files in name order."""
+    row groups). Row numbers run across the files in name order; `raw` replaces the
+    audio bytes of some rows."""
     durations = durations or {}
     texts = texts or {}
+    raw = raw or {}
     data = folder / "data"
     data.mkdir(parents=True, exist_ok=True)
     row = 0
     for f in range(files):
         audio, text = [], []
         for _ in range(rows_per_file):
-            audio.append({"bytes": _flac(durations.get(row, 1.0)), "path": f"{row}.flac"})
+            audio.append({"bytes": raw[row] if row in raw else _flac(durations.get(row, 1.0)), "path": f"{row}.flac"})
             text.append(texts.get(row, f"これはテスト文の{row}番目です。"))
             row += 1
         table = pa.table({"audio": pa.array(audio, type=AUDIO_TYPE), "transcription": text})
@@ -170,6 +175,8 @@ def test_download_writes_16k_mono_clips_reading_each_group_once(bench_dir):
     audio, sr = sf.read(str(folder / f"{first['id']}.wav"))
     assert sr == 16000 and audio.ndim == 1 and abs(len(audio) / sr - 1.0) < 0.01
     assert (folder / f"{first['id']}.txt").read_text(encoding="utf-8") == first["ref"]
+    # row numbers run across files: each clip's reference is the text of that row
+    assert all(c["ref"] == f"これはテスト文の{c['row']}番目です。" for c in m["warmup"] + m["clips"])
     warmup, clips = ds.load_clips("vtuber")
     assert len(warmup) == 3 and [c.id for c in clips] == [c["id"] for c in m["clips"]]
 
@@ -218,9 +225,213 @@ def test_unexpected_columns_stop_without_retrying(bench_dir):
     data.mkdir()
     pq.write_table(pa.table({"text": ["a"] * 5}), data / "test-00000-of-00001.parquet", row_group_size=5)
     hub = LocalHub(bench_dir)
-    with pytest.raises(ds.DownloadError, match="unexpected columns"):
+    with pytest.raises(ds.DataError, match="unexpected columns"):
         ds.download_dataset("vtuber", hub, n=1)
     assert hub.sleeps == []
+
+
+def test_layout_is_saved_only_when_every_footer_was_read(bench_dir):
+    _write_split(bench_dir, "test")
+    with pytest.raises(ds.NetworkError):
+        ds.download_dataset("vtuber", LocalHub(bench_dir, fail_after=1), n=2)
+    saved = json.loads(ds.manifest_path("vtuber").read_text(encoding="utf-8"))
+    assert saved["revision"] == "rev1" and saved["layout"] is None
+
+
+# ---------------------------------------------------------------- stops: network, data, disk
+
+def test_hub_call_that_never_answers_gives_up(bench_dir):
+    """Review finding: a silently dropped connection blocked the download forever (no
+    exception, so the retries never started)."""
+    release = threading.Event()
+
+    def never_answers(revision):
+        release.wait(30)
+        return []
+
+    hub = ds.HubParquetSource("x/y", "test", list_files=never_answers, open_file=None, get_revision=lambda: "rev1",
+                              retries=1, sleep=lambda s: None, call_timeout=0.2)
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(ds.NetworkError, match="no answer"):
+            hub.layout("rev1")
+    finally:
+        release.set()
+    assert time.monotonic() - t0 < 5
+
+
+@pytest.mark.parametrize("stuck", ["file list", "file open"])
+def test_default_hub_calls_run_under_the_time_limit(monkeypatch, stuck):
+    """huggingface_hub 2.x lists files (and looks up a file before opening it) without
+    any HTTP timeout; the default readers must still give up."""
+    import huggingface_hub
+
+    release = threading.Event()
+
+    class Api:
+        def list_repo_files(self, *args, **kwargs):
+            if stuck == "file list":
+                release.wait(30)
+            return ["data/test-00000-of-00001.parquet"]
+
+    class Fs:
+        def open(self, *args, **kwargs):
+            release.wait(30)
+            raise OSError("unreachable")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    monkeypatch.setattr(huggingface_hub, "HfFileSystem", Fs)
+    hub = ds.HubParquetSource("x/y", "test", retries=0, sleep=lambda s: None, call_timeout=0.2)
+    try:
+        with pytest.raises(ds.NetworkError, match="no answer"):
+            hub.layout("rev1")
+    finally:
+        release.set()
+
+
+def test_default_hub_reader_opens_the_pinned_revision_with_one_filesystem(monkeypatch, tmp_path):
+    import huggingface_hub
+
+    _write_split(tmp_path, "test", files=1)
+    made, opened = [], []
+
+    class Api:
+        def list_repo_files(self, hf_id, repo_type, revision):
+            assert (hf_id, repo_type, revision) == ("x/y", "dataset", "rev1")
+            return ["data/test-00000-of-00001.parquet"]
+
+    class Fs:
+        def __init__(self):
+            made.append(self)
+
+        def open(self, path, mode, block_size=None):
+            opened.append(path)
+            return open(tmp_path / path.split("@rev1/", 1)[1], mode)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    monkeypatch.setattr(huggingface_hub, "HfFileSystem", Fs)
+    hub = ds.HubParquetSource("x/y", "test", sleep=lambda s: None)
+    layout = hub.layout("rev1")
+    assert len(hub.read_group("rev1", layout[0]["file"], 0)) == 10
+    assert opened == ["datasets/x/y@rev1/data/test-00000-of-00001.parquet"] * 2 and len(made) == 1
+
+
+class _HttpError(Exception):
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.response = type("Response", (), {"status_code": status})()
+
+
+@pytest.mark.parametrize("error, kind, retried", [
+    (_HttpError(503), "NetworkError", True),
+    (_HttpError(429), "NetworkError", True),
+    (ConnectionResetError("reset"), "NetworkError", True),
+    (httpx.ReadTimeout("slow"), "NetworkError", True),
+    (_HttpError(404), "DataError", False),
+    (_HttpError(401), "DataError", False),
+    (FileNotFoundError("gone"), "DataError", False),
+    (AttributeError("'HfApi' object has no attribute 'list_repo_files'"), "DataError", False),
+])
+def test_only_network_trouble_is_retried(error, kind, retried):
+    """Review finding: every error was retried for ~30 s and then shown as a network
+    error, although a missing file or a changed library never fixes itself."""
+    sleeps = []
+
+    def fail(revision):
+        raise error
+
+    hub = ds.HubParquetSource("x/y", "test", list_files=fail, open_file=None, get_revision=lambda: "r",
+                              retries=2, sleep=sleeps.append)
+    with pytest.raises(getattr(ds, kind)):
+        hub.layout("r")
+    assert bool(sleeps) == retried
+
+
+def test_negative_retries_are_refused():
+    with pytest.raises(ValueError):
+        ds.HubParquetSource("x/y", "test", retries=-1)
+
+
+def test_disk_full_stops_with_a_disk_error_and_keeps_the_progress(bench_dir, monkeypatch):
+    _write_split(bench_dir, "test")
+    real_write = sf.write
+    calls = {"n": 0}
+
+    def write(path, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > 4:
+            raise OSError(28, "No space left on device")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(sf, "write", write)
+    with pytest.raises(ds.DiskError, match="No space left"):
+        ds.download_dataset("vtuber", LocalHub(bench_dir), n=12)
+    saved = json.loads(ds.manifest_path("vtuber").read_text(encoding="utf-8"))
+    assert len(saved["warmup"]) + len(saved["clips"]) == 4
+
+
+def test_mostly_unusable_rows_stop_the_download_early(bench_dir):
+    """Review finding: with every row unusable (broken dataset, missing codec) the loop
+    read the whole split, far beyond the size estimate, and blamed the data at the end."""
+    _write_split(bench_dir, "test", files=4, durations={r: 0.3 for r in range(120)})
+    hub = LocalHub(bench_dir)
+    with pytest.raises(ds.DataError, match=r"40 of 40 rows unusable \(duration"):
+        ds.download_dataset("vtuber", hub, n=12)
+    assert len(hub.group_reads) == 5  # 40 rows at 8 per group, not all 12 groups
+
+
+def test_undecodable_audio_is_skipped_for_this_download_only(bench_dir):
+    """Decoding can fail because of this computer (a missing codec), so the row is not
+    marked unusable for good: a later download tries it again."""
+    _write_split(bench_dir, "test")
+    order = _expected_rows(LocalHub(bench_dir), "vtuber", 2)
+    _write_split(bench_dir, "test", raw={order[0]: b"not audio at all"})
+    m = ds.download_dataset("vtuber", LocalHub(bench_dir), n=2)
+    assert order[0] not in [s["row"] for s in m["skipped"]]
+    assert order[0] not in [c["row"] for c in m["warmup"] + m["clips"]]
+
+
+@pytest.mark.parametrize("error, says", [
+    (ds.NetworkError("x/y: ReadTimeout"), "網路"),
+    (ds.DataError("x/y: unexpected columns"), "重試也不會好"),
+    (ds.DiskError("cannot write clip"), "磁碟"),
+    (RuntimeError("pyarrow is missing"), "download.log"),
+])
+def test_download_menu_explains_why_it_stopped_and_keeps_a_log(bench_dir, monkeypatch, error, says):
+    """Review finding: every stop was shown as a network error, other errors ended in a
+    traceback, and there was no log file although the menu points to one."""
+    from bench import cli, paths
+
+    def stop(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ds, "download_dataset", stop)
+    out = []
+    code = cli.cmd_download(cli.Console(input_fn=lambda p: "", print_fn=out.append), source_factory=lambda k: None)
+    assert code == 1 and says in "\n".join(out)
+    assert str(error) in (paths.clips_dir() / "download.log").read_text(encoding="utf-8")
+
+
+def test_download_menu_reports_datasets_with_too_few_clips(bench_dir):
+    from bench import cli
+
+    for split in ("sfw", "test"):
+        _write_split(bench_dir / split, split)
+    out = []
+    code = cli.cmd_download(cli.Console(input_fn=lambda p: "", print_fn=out.append),
+                            source_factory=lambda k: LocalHub(bench_dir / ds.DATASETS[k]["split"],
+                                                              split=ds.DATASETS[k]["split"]))
+    assert code == 0
+    assert any("合格的句子不夠" in line and "45/200" in line for line in out)
+
+
+def test_progress_follows_skipped_rows_too(bench_dir):
+    _write_split(bench_dir, "test")
+    order = _expected_rows(LocalHub(bench_dir), "vtuber", 2)
+    _write_split(bench_dir, "test", durations={order[0]: 0.3})
+    calls = []
+    ds.download_dataset("vtuber", LocalHub(bench_dir), n=2, progress=lambda *a: calls.append(a))
+    assert calls[0] == ("vtuber", 0, 2, 1) and calls[-1] == ("vtuber", 2, 2, 1)
 
 
 def test_manifest_of_the_old_sampling_method_is_replaced(bench_dir):
