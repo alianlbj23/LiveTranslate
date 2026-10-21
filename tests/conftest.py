@@ -62,10 +62,15 @@ _bench_paths.SETTINGS_FILE = _SANDBOX_DIR / "user_settings.json"
 os.environ["LIVETRANSLATE_BENCH_DIR"] = str(_SANDBOX_DIR / "bench")
 
 import pytest  # noqa: E402
+import ollama_server as _ollama_server  # noqa: E402
 from bench import llm_servers as _llm_servers  # noqa: E402
 
 _SERVER_PROCESS_CALLS = ("lmstudio_unload_all", "start_fast_ollama", "stop_tray_ollama", "stop_ollama")
 _REAL_LLM_SERVERS = {name: getattr(_llm_servers, name) for name in _SERVER_PROCESS_CALLS}
+# The app reaches Ollama through ollama_server (bench re-exports it): guarded the same way
+_OLLAMA_PROCESS_CALLS = ("start_fast_ollama", "start_watchdog", "stop_tray_ollama", "stop_ollama")
+_REAL_OLLAMA_SERVER = {name: getattr(_ollama_server, name) for name in _OLLAMA_PROCESS_CALLS}
+_REAL_OLLAMA_SERVER["Ollama"] = _ollama_server.Ollama
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +97,9 @@ def _no_real_llm_servers(monkeypatch):
     monkeypatch.setattr(_llm_servers, "Ollama", GuardedOllama)
     for name in _SERVER_PROCESS_CALLS:
         monkeypatch.setattr(_llm_servers, name, refuse(name))
+    monkeypatch.setattr(_ollama_server, "Ollama", GuardedOllama)
+    for name in _OLLAMA_PROCESS_CALLS:
+        monkeypatch.setattr(_ollama_server, name, refuse(f"ollama_server.{name}"))
     yield
     assert not reached, f"test reached real LLM servers: {reached}; inject fakes (Deps / monkeypatch)"
 
@@ -101,6 +109,13 @@ def real_llm_servers():
     """The real llm_servers functions the guard above replaces, for tests of those
     functions themselves (which must fake subprocess / which on their own)."""
     return dict(_REAL_LLM_SERVERS)
+
+
+@pytest.fixture
+def real_ollama_server():
+    """The real ollama_server functions / Ollama class the guard replaces, for tests of
+    ollama_server itself (which must fake psutil / subprocess / HTTP on their own)."""
+    return dict(_REAL_OLLAMA_SERVER)
 
 
 def pytest_sessionfinish(session, exitstatus):

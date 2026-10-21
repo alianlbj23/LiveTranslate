@@ -1,40 +1,33 @@
 """Translation model servers: classify a model entry, and load / unload local models so
 each one is measured alone (Ollama) or at least waited out (LM Studio).
 
-When the benchmark starts (or, with the user's consent, restarts) Ollama itself, it uses
-the same fast settings as launcher/start_jp_subtitles.ps1, so the numbers match real
-use; an Ollama the user started from the tray keeps its own settings. main.py's
-release_gpu / _warm_local_model cannot be imported (main pulls in PyQt), so the same
-/api/ps + keep_alive calls are made here."""
+The Ollama part lives in ollama_server.py (shared with the app): when the benchmark starts
+(or, with the user's consent, restarts) Ollama itself, it uses the same fast settings as
+LiveTranslate, so the numbers match real use; an Ollama the user started from the tray
+keeps its own settings. The names are re-exported here so the benchmark and its tests
+keep calling llm_servers.<name>."""
 import logging
-import os
 import shutil
-import socket
 import subprocess
-import time
-from pathlib import Path
 
-from bench import paths
+import ollama_server
+from ollama_server import (  # noqa: F401  (re-exported)
+    OLLAMA_EXE,
+    PID_FILE,
+    WATCHDOG,
+    Ollama,
+    fast_env,
+    pid_file_server,
+    stop_ollama,
+    stop_tray_ollama,
+)
 
 log = logging.getLogger("LiveTranslate.Bench.LLM")
-
-OLLAMA_EXE = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-PID_FILE = paths.ROOT / "launcher" / "ollama.pid"
-WATCHDOG = paths.ROOT / "launcher" / "gpu_watchdog.ps1"
+_port_open = ollama_server.port_open
 
 
-def fast_env(port: int) -> dict:
-    """Same values as Start-WindowsOllama in launcher/start_jp_subtitles.ps1 (a test keeps
-    them in sync)."""
-    return {
-        "OLLAMA_HOST": f"127.0.0.1:{port}",
-        "OLLAMA_KEEP_ALIVE": "30m",
-        "OLLAMA_FLASH_ATTENTION": "1",
-        "OLLAMA_KV_CACHE_TYPE": "q8_0",
-        "OLLAMA_NUM_PARALLEL": "2",
-        "OLLAMA_CONTEXT_LENGTH": "2048",
-        "OLLAMA_MAX_LOADED_MODELS": "1",
-    }
+def start_fast_ollama(port: int, log_dir):
+    return ollama_server.start_fast_ollama(port, log_dir)
 
 
 def model_kind(entry: dict) -> str:
@@ -55,155 +48,6 @@ def model_kind(entry: dict) -> str:
 def fingerprint(entry: dict) -> str:
     """Stable id of a model entry without its API key."""
     return f"{entry.get('name', '')}|{entry.get('model', '')}|{entry.get('api_base', '')}"
-
-
-def _port_open(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-            return True
-    except OSError:
-        return False
-
-
-class Ollama:
-    def __init__(self, root_url: str, http=None):
-        import httpx
-
-        self.root = root_url.rstrip("/")
-        self._http = http or httpx.Client(timeout=httpx.Timeout(30.0, connect=3.0), trust_env=False)
-
-    def alive(self) -> bool:
-        import httpx
-
-        try:
-            return self._http.get(f"{self.root}/api/version", timeout=3.0).status_code == 200
-        except httpx.HTTPError as e:
-            log.debug(f"Ollama not answering at {self.root}: {e}")
-            return False
-
-    def _models(self, path: str) -> list:
-        """Model names from /api/tags or /api/ps; an HTTP error raises (it must not read
-        as "no models")."""
-        resp = self._http.get(f"{self.root}{path}", timeout=5.0)
-        resp.raise_for_status()
-        return [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
-
-    def installed(self) -> set:
-        return set(self._models("/api/tags"))
-
-    def loaded(self) -> list:
-        return self._models("/api/ps")
-
-    def unload(self, model: str):
-        resp = self._http.post(f"{self.root}/api/generate", json={"model": model, "keep_alive": 0}, timeout=30.0)
-        if resp.status_code != 200:
-            log.warning(f"Ollama could not unload {model}: HTTP {resp.status_code} {resp.text[:200]}")
-
-    def unload_all(self, timeout: float = 30.0, sleep=time.sleep) -> bool:
-        """True when /api/ps is empty within `timeout`."""
-        deadline = time.monotonic() + timeout
-        while True:
-            models = self.loaded()
-            if not models:
-                return True
-            if time.monotonic() > deadline:
-                log.warning(f"Ollama still has {models} loaded after {timeout:.0f}s")
-                return False
-            for m in models:
-                self.unload(m)
-            sleep(1.0)
-
-    def load(self, model: str, timeout: float = 300.0) -> float:
-        """Load `model` (keep_alive 30m); returns the seconds it took."""
-        t0 = time.perf_counter()
-        resp = self._http.post(f"{self.root}/api/generate", json={"model": model, "keep_alive": "30m"},
-                               timeout=timeout)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama could not load {model}: HTTP {resp.status_code} {resp.text[:200]}")
-        return time.perf_counter() - t0
-
-
-def pid_file_server() -> int | None:
-    """PID of the Ollama the launcher (or this tool) started with the fast settings."""
-    try:
-        pid = int(PID_FILE.read_text(encoding="ascii").strip())
-    except (OSError, ValueError):
-        return None
-    import psutil
-
-    try:
-        return pid if psutil.Process(pid).name().lower().startswith("ollama") else None
-    except psutil.Error:
-        return None
-
-
-def start_fast_ollama(port: int, log_dir: Path) -> int:
-    """Start `ollama serve` with the fast settings (hidden, own process group so Ctrl+C
-    in the menu does not kill it); writes launcher/ollama.pid. Returns the PID."""
-    if not OLLAMA_EXE.exists():
-        raise RuntimeError(f"找不到 Windows 版 Ollama：{OLLAMA_EXE}")
-    env = dict(os.environ)
-    env.update(fast_env(port))
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    serve_log = Path(log_dir) / "ollama_serve.log"
-    with open(serve_log, "ab") as out:  # the child keeps its own handle
-        proc = subprocess.Popen([str(OLLAMA_EXE), "serve"], env=env, creationflags=flags, stdout=out, stderr=out)
-    PID_FILE.write_text(str(proc.pid), encoding="ascii")
-    server = Ollama(f"http://127.0.0.1:{port}")
-    for _ in range(30):
-        time.sleep(1.0)
-        if proc.poll() is not None:
-            raise RuntimeError(f"Ollama 啟動後立刻結束（結束代碼 {proc.returncode}），原因見 {serve_log}")
-        if server.alive():
-            _start_watchdog(port, log_dir)
-            return proc.pid
-    proc.kill()
-    raise RuntimeError(f"Ollama 在 30 秒內沒有回應，原因見 {serve_log}")
-
-
-def _start_watchdog(port: int, log_dir: Path):
-    """launcher/gpu_watchdog.ps1 unloads the models and stops the Ollama we started when
-    this process ends in any way (closed window, crash)."""
-    if not WATCHDOG.exists():
-        log.warning("gpu_watchdog.ps1 not found; Ollama will not be cleaned up after a crash")
-        return
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-                      "-File", str(WATCHDOG), "-ParentPid", str(os.getpid()), "-Port", str(port),
-                      "-PidFile", str(PID_FILE), "-LogFile", str(log_dir / "gpu_watchdog.log")],
-                     creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def stop_tray_ollama():
-    """Stop the tray app and the serve it started (what the launcher's Stop-WindowsOllama
-    does); only called after the user agreed and LiveTranslate is closed."""
-    import psutil
-
-    for p in psutil.process_iter(["name"]):
-        name = (p.info.get("name") or "").lower()
-        if name in ("ollama app.exe", "ollama.exe"):
-            try:
-                p.kill()
-            except psutil.Error as e:
-                log.warning(f"Could not stop {name} (pid {p.pid}): {e}")
-    time.sleep(2.0)
-
-
-def stop_ollama(pid: int):
-    import psutil
-
-    try:
-        p = psutil.Process(pid)
-        if p.name().lower().startswith("ollama"):
-            p.kill()
-    except psutil.Error as e:
-        log.info(f"Ollama pid {pid} already gone: {e}")
-    try:
-        PID_FILE.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        log.warning(f"Could not remove {PID_FILE}: {e}")
 
 
 def lmstudio_unload_all() -> bool:
