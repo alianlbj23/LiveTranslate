@@ -144,6 +144,16 @@ class _FakeNvml:
         ref._obj.gpu = 41
         return self.util_rc
 
+    def nvmlDeviceGetName(self, handle, buf, length):
+        name = b"NVIDIA GeForce RTX 5070"
+        ctypes.memmove(buf, name, len(name))
+        return 0
+
+
+def test_nvml_reader_reports_the_card_name():
+    assert system_stats.NvmlGpu(0, lib=_FakeNvml()).name() == "NVIDIA GeForce RTX 5070"
+    assert system_stats.NvmlGpu(0, lib=_FakeNvml(init_rc=9)).name() is None
+
 
 def test_nvml_reader_reports_memory_and_load():
     lib = _FakeNvml()
@@ -184,6 +194,7 @@ def test_real_nvml_reads_this_machines_card():
     stats = system_stats.NvmlGpu(0).read()
     assert stats is not None
     assert stats.total_mb > 1000 and 0 < stats.used_mb <= stats.total_mb
+    assert system_stats.NvmlGpu(0).name()
     assert stats.util_percent is None or 0 <= stats.util_percent <= 100
     # struct layouts from nvml.h: 3 x unsigned long long, 2 x unsigned int
     assert ctypes.sizeof(system_stats._Memory) == 24

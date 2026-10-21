@@ -102,11 +102,7 @@ if (-not (Test-Path $Python)) {
 # ---- Step 0: 自動更新（離線或本機有修改時略過，永不擋啟動） ----
 if (Test-Path $UpdateScript) { & $UpdateScript }
 
-# ---- Step 0b: 顯示記憶體檢查 ----
 . (Join-Path $Root "launcher\vram.ps1")
-$freeMB = Get-FreeVramMB
-if ($freeMB -ge 0) { Write-Info ("可用顯示記憶體 {0:N1} GB" -f ($freeMB / 1024)) }
-Test-LowVram -FreeMB $freeMB | Out-Null
 
 # ---- Step 1: Ollama ----
 $Port = 11434
@@ -152,13 +148,37 @@ if ($ver) {
 if (Test-HasModel $Port) {
     Write-Ok "翻譯模型 $Model 已就緒。"
 } else {
-    Write-Warn "連接埠 $Port 的 Ollama 沒有 $Model，開始下載（約 6 GB，只需一次）..."
+    $sizeText = "大小見啟動視窗的模型清單"
+    try {
+        $catalog = Get-Content -LiteralPath (Join-Path $Root "local_models.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+        $hit = @($catalog.models | Where-Object { $_.model -eq $Model })
+        if ($hit.Count -gt 0) { $sizeText = "約 {0:0.0} GB" -f [double]$hit[0].size_gb }
+    } catch {
+        Write-Warn "讀不到 local_models.json：$($_.Exception.Message)"
+    }
+    Write-Warn "連接埠 $Port 的 Ollama 沒有 $Model，開始下載（$sizeText，只需一次）..."
     $env:OLLAMA_HOST = "127.0.0.1:$Port"
     & $Ollama pull $Model
     if (-not (Test-HasModel $Port)) {
         Write-Err "模型下載失敗，請檢查網路後再試。"
         Read-Host "按 Enter 關閉"; exit 1
     }
+}
+
+# ---- Step 2b: 顯示記憶體檢查 ----
+# 在 Ollama 就緒之後才量：系統匣 Ollama 已被換掉，它載入的模型也會被這次的模型取代，所以算回可用量。
+# 門檻依目前的辨識模型＋這次的翻譯模型；判斷不了就用固定門檻。
+$vramNeed = Get-StartupVramNeed -Python $Python -Root $Root -Settings $Settings -Model $Model
+$gpuIndex = if ($vramNeed) { [int]$vramNeed.gpu_index } else { 0 }
+$freeMB = Get-FreeVramMB -Index $gpuIndex
+if ($freeMB -ge 0) {
+    $freeMB += Get-OllamaLoadedVramMB -Port $Port
+    Write-Info ("可用顯示記憶體 {0:N1} GB" -f ($freeMB / 1024))
+}
+if ($vramNeed) {
+    Test-LowVram -FreeMB $freeMB -ThresholdMB $vramNeed.free_need_mb -Pair "$($vramNeed.asr_label)＋$($vramNeed.model_label)" | Out-Null
+} else {
+    Test-LowVram -FreeMB $freeMB | Out-Null
 }
 
 # ---- Step 3: point LiveTranslate at the right port ----

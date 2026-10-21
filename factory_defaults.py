@@ -93,8 +93,14 @@ def tunable_defaults() -> dict:
     }
 
 
-def install_settings(whisper_model: str, api_base: str, model_name: str) -> dict:
-    """Everything launcher/write_settings.py writes on a fresh install."""
+INSTALL_ASR_ENGINES = {"whisper-turbo": "whisper", "sensevoice": "funasr"}  # hardware_profile.INSTALL_ASR
+
+
+def install_settings(whisper_model: str, api_base: str, model_name: str, asr: str = "whisper-turbo") -> dict:
+    """Everything launcher/write_settings.py writes on a fresh install. `asr` is the speech
+    model the installer chose for the graphics card (hardware_profile.install_choice)."""
+    if asr not in INSTALL_ASR_ENGINES:
+        raise ValueError(f"unknown install speech model {asr!r}")
     s = tunable_defaults()
     s.update(
         {
@@ -102,26 +108,35 @@ def install_settings(whisper_model: str, api_base: str, model_name: str) -> dict
             "download_proxy": "system",
             "audio_device": None,  # None = Windows 預設輸出裝置（WASAPI loopback）
             "mic_device": None,  # None = 不混入麥克風
-            "asr_engine": "whisper",
+            "asr_engine": INSTALL_ASR_ENGINES[asr],
             "whisper_model_size": whisper_model,
             "funasr_model": "sensevoice-small",
             "asr_device": "cuda:0",
-            "models": [
-                {
-                    "name": f"Ollama {model_name}",
-                    "api_base": api_base,
-                    "api_key": "ollama",
-                    "model": model_name,
-                    "proxy": "none",
-                    "thinking_style": "openai",  # Ollama /v1 only honours reasoning_effort=none
-                    "streaming": True,
-                    "context_turns": 3,
-                }
-            ],
+            "models": [_install_model_entry(model_name, api_base)],
             "active_model": 0,
         }
     )
     return s
+
+
+def _install_model_entry(model_name: str, api_base: str) -> dict:
+    """The translation model entry: a catalog model gets its catalog settings (thinking
+    style, Sakura prompt, ...); any other model the generic Ollama settings."""
+    import local_models
+
+    entry = local_models.catalog_entry(model_name, api_base)
+    if entry is not None:
+        return entry
+    return {
+        "name": f"Ollama {model_name}",
+        "api_base": api_base,
+        "api_key": "ollama",
+        "model": model_name,
+        "proxy": "none",
+        "thinking_style": "openai",  # Ollama /v1 only honours reasoning_effort=none
+        "streaming": True,
+        "context_turns": 3,
+    }
 
 
 def factory_reset(current) -> dict:

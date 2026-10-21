@@ -89,6 +89,26 @@ def test_installer_writes_the_same_factory_values(tmp_path):
     assert data["models"][0]["model"] == "qwen3.5:9b" and data["whisper_model_size"] == r"D:\models\turbo"
 
 
+def _write_settings(tmp_path, *extra):
+    return subprocess.run([sys.executable, "-I", str(ROOT / "launcher" / "write_settings.py"), str(tmp_path),
+                           "medium", "http://127.0.0.1:11434/v1", "qwen3.5:4b", *extra],
+                          capture_output=True, text=True, encoding="utf-8", timeout=60)
+
+
+def test_installer_writes_the_speech_model_chosen_for_the_card(tmp_path):
+    r = _write_settings(tmp_path, "sensevoice")
+    assert r.returncode == 0, r.stderr
+    data = json.loads((tmp_path / "user_settings.json").read_text(encoding="utf-8"))
+    assert data["asr_engine"] == "funasr" and data["funasr_model"] == "sensevoice-small"
+    assert data["models"][0]["model"] == "qwen3.5:4b"
+
+
+def test_installer_refuses_an_unknown_speech_model(tmp_path):
+    r = _write_settings(tmp_path, "whisper-v9")
+    assert r.returncode == 2 and "whisper-v9" in r.stderr
+    assert not (tmp_path / "user_settings.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # control panel
 # ---------------------------------------------------------------------------

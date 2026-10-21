@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 GUI = ROOT / "launcher" / "gui.ps1"
 SAKURA = "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"
+PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="PowerShell / WinForms launcher")
 
@@ -263,3 +264,139 @@ def test_current_model_outside_the_list_is_not_switched_by_enter(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     res = json.loads(r.stdout.strip().splitlines()[-1])
     assert res == {"before": -1, "action": "start", "model": None, "open": False}
+
+
+# ---------------------------------------------------------------- graphics card advice
+
+_ADVICE_8GB = {
+    "gpu": {"name": "NVIDIA GeForce RTX 4060", "total_gb": 8.0, "free_gb": 7.0},
+    "asr": {"key": "whisper:turbo", "label": "Whisper large-v3-turbo", "vram_gb": 2.5},
+    "models": [
+        {"model": "qwen3.5:9b", "label": "Qwen3.5 9B", "vram_gb": 6.3, "rank": 1, "total_need_gb": 10.3, "level": "too_big"},
+        {"model": "qwen3.5:4b", "label": "Qwen3.5 4B", "vram_gb": 3.7, "rank": 3, "total_need_gb": 7.7, "level": "tight"},
+        {"model": SAKURA, "label": "Sakura GalTransl 7B", "vram_gb": 4.2, "rank": 2, "total_need_gb": 8.2, "level": "too_big"},
+    ],
+    "recommended": "qwen3.5:4b",
+}
+
+
+@windows_only
+def test_choice_text_marks_what_the_card_can_run():
+    r = _ps(
+        "$e = [pscustomobject]@{ model='x'; label='Qwen3.5 9B'; size_gb=6.6; note='預設' }; "
+        "Write-Output (Format-ModelChoice -Entry $e -Downloaded $true -Current $false -Level 'ok' -Recommended $true); "
+        "Write-Output (Format-ModelChoice -Entry $e -Downloaded $true -Current $false -Level 'tight'); "
+        "Write-Output (Format-ModelChoice -Entry $e -Downloaded $true -Current $false -Level 'too_big'); "
+        "Write-Output (Format-ModelChoice -Entry $e -Downloaded $true -Current $false -Level 'unknown')")
+    assert r.returncode == 0, r.stderr
+    rec, tight, big, unknown = r.stdout.strip().splitlines()
+    assert "【推薦】" in rec and "【接近上限】" in tight and "【顯示卡可能不夠】" in big
+    assert "【" not in unknown
+
+
+_ADVICE_FN = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$global:asked = @()
+$advice = '__ADVICE__' | ConvertFrom-Json
+function Open-Form($adv) {
+    $ui = New-LauncherForm -Catalog (Get-LauncherCatalog -Root '__ROOT__') -CurrentModel 'qwen3.5:4b' -ModelsDir '__MODELS__' -Advice $adv
+    $f = $ui.Form; $f.StartPosition = 'Manual'; $f.Location = New-Object System.Drawing.Point(-5000, -5000)
+    $f.ShowInTaskbar = $false; $f.Show(); [System.Windows.Forms.Application]::DoEvents()
+    return $ui
+}
+function Start-With([string]$select, $answer) {
+    $ui = Open-Form $advice
+    $f = $ui.Form
+    $f.Tag.Confirm = { param($text) $global:asked += $text; $answer }.GetNewClosure()
+    $i = 0
+    foreach ($item in $ui.ModelBox.Items) { if ($item -like "*$select*") { $ui.ModelBox.SelectedIndex = $i }; $i++ }
+    $f.Controls.Find('btnStart', $true)[0].PerformClick(); [System.Windows.Forms.Application]::DoEvents()
+    $out = @{ action = $ui.Result.Action; model = $ui.Result.Model; open = $f.Visible; selected = [string]$ui.ModelBox.SelectedItem }
+    $f.Dispose()
+    return $out
+}
+"""
+
+
+def _advice_script(tmp_path, body, advice=_ADVICE_8GB):
+    models = _fake_models_dir(tmp_path)
+    lib = models / "manifests" / "registry.ollama.ai" / "library" / "qwen3.5"
+    (lib / "4b").write_text("{}", encoding="utf-8")
+    script = (_ADVICE_FN + body).replace("__ROOT__", str(ROOT)).replace("__MODELS__", str(models)) \
+        .replace("__ADVICE__", json.dumps(advice, ensure_ascii=False).replace("'", "''"))
+    r = _ps_script(tmp_path, script)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+@windows_only
+def test_window_shows_the_card_and_marks_each_model(tmp_path):
+    res = _advice_script(tmp_path, r"""
+$ui = Open-Form $advice
+$items = @($ui.ModelBox.Items | ForEach-Object { [string]$_ })
+$hw = $ui.Form.Controls.Find('lblHardware', $true)[0].Text
+$none = Open-Form ('{"gpu": null, "asr": {"label": "SenseVoice Small"}, "models": [], "recommended": null}' | ConvertFrom-Json)
+$noneText = $none.Form.Controls.Find('lblHardware', $true)[0].Text
+$plain = Open-Form $null
+@{ items = $items; hw = $hw; none = $noneText; plainItems = @($plain.ModelBox.Items | ForEach-Object { [string]$_ });
+   plainHw = $plain.Form.Controls.Find('lblHardware', $true)[0].Visible } | ConvertTo-Json -Compress
+""")
+    items = {next(m for m in ("Qwen3.5 9B", "Qwen3.5 4B", "Sakura") if m in t): t for t in res["items"]}
+    assert "【顯示卡可能不夠】" in items["Qwen3.5 9B"] and "【顯示卡可能不夠】" in items["Sakura"]
+    assert "【推薦】" in items["Qwen3.5 4B"]
+    assert "RTX 4060" in res["hw"] and "8.0 GB" in res["hw"] and "Qwen3.5 4B" in res["hw"] and "Whisper" in res["hw"]
+    assert "讀不到" in res["none"]
+    # no advice (helper failed): the window works as before, without marks
+    assert not any("【" in t for t in res["plainItems"]) and res["plainHw"] is False
+
+
+@windows_only
+def test_model_the_card_cannot_hold_needs_confirmation(tmp_path):
+    """Picking a model marked 顯示卡可能不夠 asks first (with the numbers); declining keeps
+    the current model, agreeing goes on as usual (download question included)."""
+    res = _advice_script(tmp_path, r"""
+$r = [ordered]@{}
+$global:asked = @()
+$r['no'] = Start-With 'Qwen3.5 9B' $false
+$r['askedNo'] = $global:asked
+$global:asked = @()
+$r['yes'] = Start-With 'Qwen3.5 9B' $true
+$r['askedYes'] = $global:asked
+$global:asked = @()
+$r['sakura'] = Start-With 'Sakura' $true
+$r['askedSakura'] = $global:asked
+$r | ConvertTo-Json -Compress -Depth 4
+""")
+    assert res["no"]["action"] == "exit" and res["no"]["open"] is True and "Qwen3.5 4B" in res["no"]["selected"]
+    assert len(res["askedNo"]) == 1 and "8.0 GB" in res["askedNo"][0] and "10.3 GB" in res["askedNo"][0]
+    assert "Qwen3.5 4B" in res["askedNo"][0]  # points to the recommended model
+    assert {k: res["yes"][k] for k in ("action", "model", "open")} == {"action": "start", "model": "qwen3.5:9b", "open": False}
+    assert len(res["askedYes"]) == 1  # downloaded: only the card question
+    # too big and not downloaded: the card question, then the download question
+    assert res["sakura"]["model"] == SAKURA and len(res["askedSakura"]) == 2
+    assert "4.3 GB" in res["askedSakura"][1]
+
+
+@windows_only
+@pytest.mark.skipif(not PYTHON.exists(), reason="the project venv runs the advice helper")
+def test_advice_comes_from_the_python_helper(tmp_path):
+    settings = tmp_path / "user_settings.json"
+    settings.write_text(json.dumps({"asr_engine": "funasr", "funasr_model": "sensevoice-small"}), encoding="utf-8")
+    r = _ps(f"$a = Get-HardwareAdvice -Root '{ROOT}' -Python '{PYTHON}' -Settings '{settings}' -TotalMB 8192; "
+            "@{ rec = $a.recommended; total = $a.gpu.total_gb; asr = $a.asr.key } | ConvertTo-Json -Compress")
+    res = _json(r)
+    assert res == {"rec": SAKURA, "total": 8.0, "asr": "funasr:sensevoice-small"}
+    # no Python (not installed yet) or a failing helper: no advice, no exception
+    r = _ps(f"$a = Get-HardwareAdvice -Root '{ROOT}' -Python '{tmp_path / 'missing.exe'}'; [string]($null -eq $a)")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().splitlines()[-1] == "True"
+
+
+def test_launcher_and_text_menu_use_the_card_advice():
+    gui = GUI.read_text(encoding="utf-8-sig")
+    menu = (ROOT / "launcher" / "menu.ps1").read_text(encoding="utf-8-sig")
+    show = re.search(r"function Show-LauncherWindow \{(.*?)\n\}", gui, re.S).group(1)
+    assert "Get-HardwareAdvice" in show and "-Advice" in show
+    assert "Show-LauncherWindow -Root $Root -Python $Python" in menu
+    text = re.search(r"function Show-TextMenu \{(.*?)\n\}", menu, re.S).group(1)
+    assert "Get-HardwareAdvice" in text and "Resolve-HardwareRequest" in text
