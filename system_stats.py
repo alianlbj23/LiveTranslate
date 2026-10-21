@@ -120,3 +120,17 @@ class NvmlGpu:
             self._failed = True
             log.warning(f"GPU stats unavailable for GPU {self.index}, showing N/A: {e}")
             return None
+
+    def name(self) -> Optional[str]:
+        """Product name of the card (e.g. "NVIDIA GeForce RTX 5070"), None when unknown."""
+        if self._failed:
+            return None
+        try:
+            if self._handle is None:
+                self._open()
+            buf = ctypes.create_string_buffer(96)  # NVML_DEVICE_NAME_V2_BUFFER_SIZE
+            self._call("nvmlDeviceGetName", self._handle, buf, ctypes.c_uint(len(buf)))
+            return buf.value.decode("utf-8", errors="replace") or None
+        except (OSError, RuntimeError, AttributeError) as e:
+            log.warning(f"GPU name unavailable for GPU {self.index}: {e}")
+            return None

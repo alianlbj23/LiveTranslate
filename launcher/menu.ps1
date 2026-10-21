@@ -64,13 +64,19 @@ function Show-TextMenu {
     # 文字選單（啟動視窗開不了時的備援）：模型清單來自 local_models.json
     $catalog = @(Get-LauncherCatalog -Root $Root)
     $current = Get-LauncherModel -Path $ModelFile
+    $advice = Get-HardwareAdvice -Root $Root -Python $Python
     Write-Host ""
     Write-Host "============ LiveTranslate ============" -ForegroundColor Magenta
+    if ($advice) { Write-Host (" " + (Format-HardwareSummary -Advice $advice)) -ForegroundColor DarkGray }
     Write-Host " 1) 啟動日文雙字幕                （預設：直接按 Enter）"
     Write-Host " 2) 檢查 GPU / Ollama / 翻譯是否正常"
     for ($i = 0; $i -lt $catalog.Count; $i++) {
         $e = $catalog[$i]
         $mark = if ($e.model -eq $current) { "（使用中）" } else { "" }
+        $fit = Get-ModelAdvice -Advice $advice -Model $e.model
+        if ($advice -and $advice.recommended -eq $e.model) { $mark += "【推薦】" }
+        elseif ($fit -and $fit.level -eq "tight") { $mark += "【接近上限】" }
+        elseif ($fit -and $fit.level -eq "too_big") { $mark += "【顯示卡可能不夠】" }
         Write-Host (" {0}) 切換翻譯模型為 {1}：{2}{3}" -f ($i + 3), $e.label, $e.note, $mark)
     }
     $guideNo = $catalog.Count + 3
@@ -90,6 +96,10 @@ function Show-TextMenu {
         if ($n -ge 3 -and $n -lt $guideNo) {
             $e = $catalog[$n - 3]
             $ask = { param($text) ((Read-Host ($text.Replace("`n`n", " ") + " (y/N)")).Trim().ToLower() -eq "y") }
+            if ($e.model -ne $current -and -not (Resolve-HardwareRequest -Entry $e -Advice $advice -Confirm $ask)) {
+                Write-Host "沒有切換，維持使用目前的模型。" -ForegroundColor Yellow
+                return @{ Action = "none" }
+            }
             $decision = Resolve-SwitchRequest -Entry $e -CurrentModel $current `
                 -Downloaded (Test-OllamaModelDownloaded -Model $e.model) -Confirm $ask
             if ($decision -eq "switch") { return @{ Action = "switch"; Model = $e.model } }
@@ -119,7 +129,7 @@ while ($true) {
     $r = $null
     if (-not $useText) {
         try {
-            $r = Show-LauncherWindow -Root $Root -CurrentModel (Get-LauncherModel -Path $ModelFile)
+            $r = Show-LauncherWindow -Root $Root -Python $Python -CurrentModel (Get-LauncherModel -Path $ModelFile)
         } catch {
             Write-Host "[注意] 啟動視窗無法開啟（$($_.Exception.Message)），改用文字選單。" -ForegroundColor Yellow
             $useText = $true

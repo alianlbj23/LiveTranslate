@@ -1,7 +1,8 @@
 ﻿# LiveTranslate 一鍵安裝
 # 第一次雙擊 LiveTranslate.bat 時（找不到 .venv）會自動執行；也可手動：powershell -File launcher\setup.ps1
 # 會做的事：檢查驅動／網路／磁碟 → winget 安裝 Python、Git、Ollama（缺的才裝）→ 建 .venv 並安裝套件
-#          → 預載 cuBLAS DLL → 下載 Whisper 模型 → 寫入預設設定。翻譯模型 qwen3.5:9b 由啟動腳本在之後下載。
+#          → 預載 cuBLAS DLL → 依顯示卡大小選預設的辨識＋翻譯模型（hardware_profile.py）→ 下載 Whisper
+#          （選到它才下載）→ 寫入預設設定。翻譯模型由啟動腳本在之後下載。
 param(
     [switch]$Yes,          # 不問直接開始（測試用）
     [switch]$SkipModels    # 不下載 Whisper 模型、不寫設定（測試用）
@@ -15,6 +16,9 @@ $LogDir = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogFile = Join-Path $LogDir ("setup_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
 Start-Transcript -Path $LogFile -Append | Out-Null
+
+. (Join-Path $PSScriptRoot "vram.ps1")   # Get-InstallChoice
+. (Join-Path $PSScriptRoot "model.ps1")  # Set-LauncherModel
 
 function Write-Step { param($m) Write-Host "`n[$((Get-Date).ToString('HH:mm:ss'))] $m" -ForegroundColor Cyan }
 function Write-Ok   { param($m) Write-Host "  [完成] $m" -ForegroundColor Green }
@@ -57,7 +61,7 @@ Write-Host "==========================================" -ForegroundColor Magenta
 Write-Host "   LiveTranslate 一鍵安裝" -ForegroundColor Magenta
 Write-Host "==========================================" -ForegroundColor Magenta
 Write-Host "  安裝位置：$Root"
-Write-Host "  會下載約 12 GB（Python 套件 5 GB、語音模型 1.5 GB、翻譯模型 6.5 GB），需要 20–40 分鐘。"
+Write-Host "  最多會下載約 12 GB（Python 套件約 5 GB；語音與翻譯模型依顯示卡大小選擇，最多約 8 GB），需要 20–40 分鐘。"
 Write-Host "  過程中不用操作；若中途失敗，重新雙擊 LiveTranslate.bat 會從沒完成的地方繼續。"
 if (-not $Yes) {
     $a = Read-Host "  按 Enter 開始，或輸入 n 取消"
@@ -90,7 +94,6 @@ try { $vramMB = [int]((& nvidia-smi --query-gpu=memory.total --format=csv,nohead
 Write-Ok "顯示卡：$gpuName（compute capability $cc，驅動支援 CUDA $cudaVer，VRAM $vramMB MB）"
 if ($cc -ge 12.0) { $CudaIndex = "cu128" } else { $CudaIndex = "cu126" }
 if ($cc -ge 12.0 -and $cudaVer -lt 12.8) { Fail "RTX 50 系列需要支援 CUDA 12.8 以上的驅動，目前是 $cudaVer，請更新 NVIDIA 驅動。" }
-if ($vramMB -gt 0 -and $vramMB -lt 10000) { Write-Warn "顯示記憶體少於 10 GB，之後請在選單用 3) 切換到 qwen3.5:4b。" }
 try {
     Invoke-WebRequest -Uri "https://pypi.org/simple/pip/" -Method Head -UseBasicParsing -TimeoutSec 10 | Out-Null
 } catch {
@@ -186,27 +189,53 @@ Set-Content -LiteralPath $Ready -Value (Get-Date -Format o) -Encoding ascii
 Remove-Item -Recurse -Force $env:PIP_CACHE_DIR, $env:TMP -ErrorAction SilentlyContinue
 
 # ---------- 4. 語音模型與預設設定 ----------
+$choice = $null
 if (-not $SkipModels) {
-    Write-Step "下載語音辨識模型 faster-whisper large-v3-turbo（約 1.5 GB）..."
-    $whisperOut = & $VenvPy -I (Join-Path $Root "launcher\download_whisper_turbo.py") $Root
-    if ($LASTEXITCODE -ne 0) { Fail "Whisper 模型下載失敗" }
-    $WhisperPath = ($whisperOut | Select-Object -Last 1).Trim()
-    Write-Ok "模型位置：$WhisperPath"
-
     $SettingsFile = Join-Path $Root "user_settings.json"
-    if (Test-Path $SettingsFile) {
+    $fresh = -not (Test-Path $SettingsFile)
+    # 不先下載用不到的模型：新安裝依顯示卡選；已有設定（重新安裝）就看設定裡用的是不是 Whisper turbo
+    $needTurbo = $true
+    if ($fresh) {
+        Write-Step "依顯示卡（$vramMB MB）選擇預設的辨識與翻譯模型..."
+        $choice = Get-InstallChoice -Python $VenvPy -Root $Root -TotalMB $vramMB
+        if ($choice.level -eq "too_big") { Write-Warn $choice.message } else { Write-Ok $choice.message }
+        $needTurbo = ($choice.asr_choice -eq "whisper-turbo")
+    } else {
+        $current = Invoke-HardwareAdvice -Python $VenvPy -Root $Root -Arguments @("launcher", $SettingsFile, "--total-mb", "$vramMB")
+        if ($current) { $needTurbo = ($current.asr.key -eq "whisper:turbo") }  # 判斷不了就照舊下載
+    }
+    $WhisperPath = "medium"  # 沒下載 turbo 時的值：之後在控制面板改用 Whisper 會先問要不要下載
+    if ($needTurbo) {
+        Write-Step "下載語音辨識模型 faster-whisper large-v3-turbo（約 1.5 GB）..."
+        $whisperOut = & $VenvPy -I (Join-Path $Root "launcher\download_whisper_turbo.py") $Root
+        if ($LASTEXITCODE -ne 0) { Fail "Whisper 模型下載失敗" }
+        $WhisperPath = ($whisperOut | Select-Object -Last 1).Trim()
+        Write-Ok "模型位置：$WhisperPath"
+    } elseif ($fresh) {
+        Write-Ok "語音辨識使用 SenseVoice Small（約 0.9 GB），第一次開啟字幕程式時會自動下載。"
+    } else {
+        Write-Ok "目前的設定沒有用 Whisper turbo，不下載。"
+    }
+
+    if (-not $fresh) {
         Write-Ok "已有 user_settings.json，保留原設定"
     } else {
         Write-Step "寫入預設設定（日文 → 台灣繁體中文、即時預覽）..."
-        & $VenvPy -I (Join-Path $Root "launcher\write_settings.py") $Root $WhisperPath "http://127.0.0.1:11434/v1" "qwen3.5:9b"
+        & $VenvPy -I (Join-Path $Root "launcher\write_settings.py") $Root $WhisperPath "http://127.0.0.1:11434/v1" $choice.model $choice.asr_choice
         if ($LASTEXITCODE -ne 0) { Fail "寫入設定失敗" }
+        # 啟動腳本依 selected_model.txt 下載並使用翻譯模型
+        if (-not (Set-LauncherModel -Path (Join-Path $Root "launcher\selected_model.txt") -Model $choice.model)) {
+            Fail "無法記下選擇的翻譯模型（launcher\selected_model.txt）"
+        }
         Write-Ok "設定完成"
     }
 }
 
+$next = "接下來會啟動程式並下載翻譯模型（只需一次）"
+if ($choice) { $next = "接下來會啟動程式並下載翻譯模型 {0}（約 {1:0.0} GB，只需一次）" -f $choice.label, [double]$choice.size_gb }
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
-Write-Host "   安裝完成！接下來會啟動程式並下載翻譯模型（6.5 GB，只需一次）" -ForegroundColor Green
+Write-Host "   安裝完成！$next" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  紀錄：$LogFile" -ForegroundColor DarkGray
 Stop-Transcript | Out-Null

@@ -4,6 +4,8 @@
 # 用法：. (Join-Path $Root "launcher\gui.ps1")；$r = Show-LauncherWindow ...；$r.Action = start | verify | guide | bench | switch | exit
 #       start / switch 的 $r.Model 是要換成的模型（$null = 沿用目前的模型）
 
+. (Join-Path $PSScriptRoot "vram.ps1")  # Invoke-HardwareAdvice
+
 function Get-LauncherCatalog {
     # local_models.json 的模型清單（與 local_models.py 共用）
     param([string]$Root)
@@ -45,11 +47,60 @@ function Test-OllamaModelDownloaded {
 }
 
 function Format-ModelChoice {
-    param($Entry, [bool]$Downloaded, [bool]$Current)
+    # $Level / $Recommended 來自 Get-HardwareAdvice（顯示卡放不放得下這個模型＋目前的辨識模型）
+    param($Entry, [bool]$Downloaded, [bool]$Current, [string]$Level = "", [bool]$Recommended = $false)
     $state = if ($Downloaded) { "已下載" } else { ("需下載約 {0:0.0} GB" -f [double]$Entry.size_gb) }
-    $text = "{0} — {1}（{2}）" -f $Entry.label, $Entry.note, $state
+    $tag = ""
+    if ($Recommended) { $tag = "【推薦】" }
+    elseif ($Level -eq "tight") { $tag = "【接近上限】" }
+    elseif ($Level -eq "too_big") { $tag = "【顯示卡可能不夠】" }
+    $text = "{0}{1} — {2}（{3}）" -f $Entry.label, $tag, $Entry.note, $state
     if ($Current) { $text = "★ 使用中：" + $text }
     return $text
+}
+
+function Get-HardwareAdvice {
+    # 這台電腦的顯示卡能跑哪些翻譯模型（判斷在 hardware_profile.py，經 launcher\hardware_advice.py）。
+    # 拿不到（還沒安裝、沒有 NVIDIA 驅動、程式出錯）就回傳 $null：視窗照常運作，只是不標示。
+    param([string]$Root, [string]$Python, [string]$Settings = (Join-Path $Root "user_settings.json"), [int]$TotalMB = 0)
+    $argv = @("launcher", $Settings)
+    if ($TotalMB -gt 0) { $argv += @("--total-mb", "$TotalMB") }
+    return Invoke-HardwareAdvice -Python $Python -Root $Root -Arguments $argv
+}
+
+function Get-ModelAdvice {
+    param($Advice, [string]$Model)
+    if (-not $Advice -or -not $Model) { return $null }
+    foreach ($m in @($Advice.models)) { if ($m.model -eq $Model) { return $m } }
+    return $null
+}
+
+function Format-HardwareSummary {
+    # 視窗上那一行：顯示卡、目前的辨識模型、推薦的翻譯模型
+    param($Advice)
+    if (-not $Advice) { return "" }
+    if (-not $Advice.gpu) { return "讀不到 NVIDIA 顯示卡的資訊，無法判斷哪些翻譯模型跑得動。" }
+    $card = "顯示卡 {0:0.0} GB" -f [double]$Advice.gpu.total_gb
+    if ($Advice.gpu.name) {
+        $name = ([string]$Advice.gpu.name -replace '^NVIDIA\s+', '' -replace '^GeForce\s+', '')  # 窗格寬度有限
+        $card = "{0}（{1:0.0} GB）" -f $name, [double]$Advice.gpu.total_gb
+    }
+    $rec = Get-ModelAdvice -Advice $Advice -Model $Advice.recommended
+    if ($rec) { return "{0}｜辨識：{1}｜推薦：{2}" -f $card, $Advice.asr.label, $rec.label }
+    return "{0}｜辨識：{1}｜放不下任何本機翻譯模型，建議改用雲端翻譯或較輕的辨識模型" -f $card, $Advice.asr.label
+}
+
+function Resolve-HardwareRequest {
+    # 選了顯示卡放不下的模型（too_big）：說明後確認；回傳 $true = 照樣使用。其他情況直接 $true。
+    param($Entry, $Advice, [scriptblock]$Confirm)
+    $m = Get-ModelAdvice -Advice $Advice -Model $Entry.model
+    if (-not $m -or $m.level -ne "too_big") { return $true }
+    $rec = Get-ModelAdvice -Advice $Advice -Model $Advice.recommended
+    $tip = if ($rec) { "建議改用標示【推薦】的「$($rec.label)」。" } else { "建議改用雲端翻譯或較輕的辨識模型。" }
+    $text = ("這台電腦的顯示卡只有 {0:0.0} GB；「{1}」搭配目前的辨識模型（{2}）大約需要 {3:0.0} GB。" +
+             "放不下時翻譯會改用 CPU，每句可能要等 10 秒以上。{4}`n`n還是要用「{1}」嗎？") -f `
+             [double]$Advice.gpu.total_gb, $Entry.label, $Advice.asr.label, [double]$m.total_need_gb, $tip
+    return [bool](& $Confirm $text)
 }
 
 function Resolve-SwitchRequest {
@@ -71,7 +122,18 @@ function Resolve-SelectedModel {
     if ($st.Box.SelectedIndex -lt 0) { return @{ Proceed = $true; Model = $null } }
     $e = $st.Entries[$st.Box.SelectedIndex]
     if ($e.model -eq $st.Current) { return @{ Proceed = $true; Model = $null } }
-    $ask = $st.Confirm  # tests replace the download question with a fixed answer
+    $hwAsk = $st.Confirm  # tests replace both questions with a fixed answer
+    if (-not $hwAsk) {
+        $hwAsk = { param($text) ([System.Windows.Forms.MessageBox]::Show($Form, $text, "顯示卡可能不夠",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -eq
+            [System.Windows.Forms.DialogResult]::Yes) }
+    }
+    if (-not (Resolve-HardwareRequest -Entry $e -Advice $st.Advice -Confirm $hwAsk)) {
+        $st.Box.SelectedIndex = $st.CurrentIndex
+        $st.Hint.Text = "沒有切換，維持使用目前的模型（「$($e.label)」這台電腦的顯示卡可能放不下）。"
+        return @{ Proceed = $false; Model = $null }
+    }
+    $ask = $st.Confirm
     if (-not $ask) {
         $ask = { param($text) ([System.Windows.Forms.MessageBox]::Show($Form, $text, "下載翻譯模型",
             [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question) -eq
@@ -99,7 +161,8 @@ function New-LauncherForm {
     # 按鈕的處理程式不使用 GetNewClosure：它只帶走當下這一層的變數，而且會看不到
     # menu.ps1 載入的函式（2026-10-20 的「The property 'Action' cannot be found」）。
     # 需要的狀態一律放在 $form.Tag，處理程式用 $this（被按的按鈕）找回所在的視窗。
-    param($Catalog, [string]$CurrentModel, [string]$ModelsDir = (Get-OllamaModelsDir))
+    # $Advice：Get-HardwareAdvice 的結果；$null = 不標示（視窗照常運作）
+    param($Catalog, [string]$CurrentModel, [string]$ModelsDir = (Get-OllamaModelsDir), $Advice = $null)
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     $result = @{ Action = "exit"; Model = $null }
@@ -109,7 +172,7 @@ function New-LauncherForm {
     $form.Text = "LiveTranslate"
     $form.Font = $font
     $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
-    $form.ClientSize = New-Object System.Drawing.Size(560, 378)
+    $form.ClientSize = New-Object System.Drawing.Size(560, 404)
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     $form.MaximizeBox = $false
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
@@ -151,9 +214,19 @@ function New-LauncherForm {
     })
     $form.Controls.Add($btnStart)
 
+    $hw = New-Object System.Windows.Forms.Label
+    $hw.Name = "lblHardware"
+    $hw.Text = Format-HardwareSummary -Advice $Advice
+    $hw.Visible = [bool]$Advice
+    $hw.ForeColor = [System.Drawing.Color]::DarkSlateGray
+    $hw.Font = New-Object System.Drawing.Font("Microsoft JhengHei UI", 9)
+    $hw.Location = New-Object System.Drawing.Point(22, 156); $hw.Size = New-Object System.Drawing.Size(518, 22)
+    $hw.AutoEllipsis = $true
+    $form.Controls.Add($hw)
+
     $grp = New-Object System.Windows.Forms.GroupBox
     $grp.Text = "翻譯模型"
-    $grp.Location = New-Object System.Drawing.Point(20, 160); $grp.Size = New-Object System.Drawing.Size(520, 122)
+    $grp.Location = New-Object System.Drawing.Point(20, 184); $grp.Size = New-Object System.Drawing.Size(520, 122)
     $form.Controls.Add($grp)
 
     $box = New-Object System.Windows.Forms.ComboBox
@@ -168,7 +241,11 @@ function New-LauncherForm {
     for ($i = 0; $i -lt $entries.Count; $i++) {
         $e = $entries[$i]
         $downloaded[$e.model] = (Test-OllamaModelDownloaded -Model $e.model -ModelsDir $ModelsDir)
-        [void]$box.Items.Add((Format-ModelChoice -Entry $e -Downloaded $downloaded[$e.model] -Current ($e.model -eq $CurrentModel)))
+        $fit = Get-ModelAdvice -Advice $Advice -Model $e.model
+        $level = if ($fit) { [string]$fit.level } else { "" }
+        $isRec = [bool]($Advice -and $Advice.recommended -eq $e.model)
+        [void]$box.Items.Add((Format-ModelChoice -Entry $e -Downloaded $downloaded[$e.model] -Current ($e.model -eq $CurrentModel) `
+            -Level $level -Recommended $isRec))
         if ($e.model -eq $CurrentModel) { $currentIndex = $i }
     }
     $box.SelectedIndex = $currentIndex
@@ -204,7 +281,7 @@ function New-LauncherForm {
     foreach ($spec in $row) {
         $b = New-Object System.Windows.Forms.Button
         $b.Name = $spec[0]; $b.Text = $spec[1]; $b.Tag = $spec[3]
-        $b.Location = New-Object System.Drawing.Point($spec[2], 296); $b.Size = New-Object System.Drawing.Size(124, 36)
+        $b.Location = New-Object System.Drawing.Point($spec[2], 320); $b.Size = New-Object System.Drawing.Size(124, 36)
         $b.Add_Click($onAction)
         $form.Controls.Add($b)
         $buttons[$spec[0]] = $b
@@ -213,10 +290,11 @@ function New-LauncherForm {
     $foot = New-Object System.Windows.Forms.Label
     $foot.Text = "每次啟動會自動檢查更新；關閉字幕程式就會釋放顯示卡。"
     $foot.ForeColor = [System.Drawing.Color]::Gray
-    $foot.Location = New-Object System.Drawing.Point(22, 344); $foot.AutoSize = $true
+    $foot.Location = New-Object System.Drawing.Point(22, 368); $foot.AutoSize = $true
     $form.Controls.Add($foot)
 
-    $form.Tag = @{ Result = $result; Box = $box; Entries = $entries; Downloaded = $downloaded; Current = $CurrentModel; CurrentIndex = $currentIndex; Hint = $hint; Confirm = $null }
+    $form.Tag = @{ Result = $result; Box = $box; Entries = $entries; Downloaded = $downloaded; Current = $CurrentModel;
+                   CurrentIndex = $currentIndex; Hint = $hint; Confirm = $null; Advice = $Advice }
     $form.AcceptButton = $btnStart            # Enter = 啟動
     $form.CancelButton = $buttons["btnExit"]  # Esc = 離開
     $form.Add_Shown({ $this.AcceptButton.Focus() })
@@ -224,10 +302,11 @@ function New-LauncherForm {
 }
 
 function Show-LauncherWindow {
-    param([string]$Root, [string]$CurrentModel)
+    param([string]$Root, [string]$CurrentModel, [string]$Python = (Join-Path $Root ".venv\Scripts\python.exe"))
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.Application]::EnableVisualStyles()
-    $ui = New-LauncherForm -Catalog (Get-LauncherCatalog -Root $Root) -CurrentModel $CurrentModel
+    $advice = Get-HardwareAdvice -Root $Root -Python $Python
+    $ui = New-LauncherForm -Catalog (Get-LauncherCatalog -Root $Root) -CurrentModel $CurrentModel -Advice $advice
     [void]$ui.Form.ShowDialog()
     $ui.Form.Dispose()
     return $ui.Result
