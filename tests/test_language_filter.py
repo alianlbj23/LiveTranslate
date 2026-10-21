@@ -251,6 +251,51 @@ def test_asr_errors_in_a_row_notify_the_tray_once(caplog):
     assert len(notices) == 2
 
 
+def test_asr_failures_caught_by_the_segment_handlers_still_notify():
+    """Review finding: _process_segment and the interim handlers catch _run_asr's errors
+    themselves, so the loop-level counter never saw a failing ASR. The count lives in
+    _run_asr: three failures in a row notify, a success starts over."""
+    import threading
+
+    app = _app()
+    del app._run_asr  # the real one
+    notices = []
+    app._lang_notice_callback = notices.append
+    outcome = {"fail": True}
+
+    class Client:
+        def transcribe(self, audio, **kwargs):
+            if outcome["fail"]:
+                raise RuntimeError("CUDA error: an illegal memory access")
+            return {"text": "はい", "language": "ja"}
+
+    app._asr_lock = threading.Lock()
+    app._asr_ready = True
+    app._asr = Client()
+    app._asr_type = "whisper"
+    app._funasr_model_key = None
+    app._asr_error_count = 0
+    app._asr_restart_count = 0
+    app._apply_pending_asr_settings = lambda client, asr_type, funasr_key: None
+    app._log_mem_after_asr = lambda kind, seconds, ms: None
+
+    def segment():
+        try:
+            return app._run_asr(np.zeros(1600, dtype=np.float32), "segment")
+        except RuntimeError:
+            return None  # what _process_segment does with it
+
+    for _ in range(4):
+        segment()
+    assert len(notices) == 1 and "3" in notices[0]
+    outcome["fail"] = False
+    assert segment()[0]["text"] == "はい"
+    outcome["fail"] = True
+    for _ in range(3):
+        segment()
+    assert len(notices) == 2
+
+
 def test_lines_dropped_now_and_then_notify_too():
     """Review finding: only five drops in a row raised a notice, so a model answering
     every second or third line in Korean never told the user why lines were missing."""

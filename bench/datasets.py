@@ -87,6 +87,11 @@ class DataError(DownloadError):
     cannot help."""
 
 
+class CodecError(DataError):
+    """Most audio could not be decoded on this computer (a missing or broken audio
+    library), which is not a problem of the dataset."""
+
+
 class DiskError(DownloadError):
     """A clip or the manifest could not be written (disk full, no permission)."""
 
@@ -360,13 +365,15 @@ def _collected(m: dict) -> int:
     return len(m["warmup"]) + len(m["clips"])
 
 
-def _check_skip_share(key: str, checked: int, skips: Counter):
-    """Stop when most rows of this download were unusable: a broken dataset or a missing
-    codec, which would otherwise read the whole split (far more than the estimate)."""
+def _check_skip_share(key: str, checked: int, skips: Counter, undecodable: int):
+    """Stop when most rows of this download were unusable: a broken dataset (DataError)
+    or audio this computer cannot decode (CodecError), which would otherwise read the
+    whole split (far more than the estimate)."""
     skipped = sum(skips.values())
     if checked >= SKIP_CHECK_ROWS and skipped > checked * MAX_SKIP_SHARE:
         top = "；".join(f"{reason} ×{count}" for reason, count in skips.most_common(3))
-        raise DataError(f"{key}: {skipped} of {checked} rows unusable ({top})")
+        error = CodecError if undecodable * 2 > skipped else DataError
+        raise error(f"{key}: {skipped} of {checked} rows unusable ({top})")
 
 
 def download_dataset(key: str, source, n: int | None = None, progress=None, info=None) -> dict:
@@ -412,7 +419,7 @@ def download_dataset(key: str, source, n: int | None = None, progress=None, info
         total += g["rows"]
 
     seen = {c["row"] for c in m["warmup"] + m["clips"]} | {s["row"] for s in m["skipped"]}
-    checked_now = 0
+    checked_now = undecodable_now = 0
     skips_now = Counter()  # this download only: the brake judges what is happening now
     for gi, offsets in sample_plan(key, layout):
         if _collected(m) >= target:
@@ -436,10 +443,11 @@ def download_dataset(key: str, source, n: int | None = None, progress=None, info
                     m["skipped"].append({"row": row, "reason": checked.reason})
                     _atomic_write_json(mpath, m)
                 else:
+                    undecodable_now += 1
                     log.warning(f"{key}: row {row} skipped for this download: {checked.reason}")
                 if progress:
                     progress(key, len(m["clips"]), n, sum(skips_now.values()))
-                _check_skip_share(key, checked_now, skips_now)
+                _check_skip_share(key, checked_now, skips_now, undecodable_now)
                 continue
             audio, duration, ref = checked
             cid = f"{row:06d}"

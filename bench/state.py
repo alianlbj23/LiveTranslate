@@ -4,7 +4,8 @@ bench_results/<YYYYMMDD_HHMMSS>/
   plan.json      what this run measures (never changes; no API keys)
   state.json     task list and frozen stage results (atomic writes)
   results/<kind>.jsonl   one record per line, flushed + fsynced; a cut-off last line
-                         (crash mid-write) is ignored when reading
+                         (crash mid-write) is ignored when reading and removed before
+                         the next record is appended
   bench.log      everything the run logged (the console points here on errors)
   ollama_serve.log, gpu_watchdog.log   only when the benchmark started Ollama itself
   report.html, results.csv, recommendations.json
@@ -12,7 +13,7 @@ bench_results/.running.lock holds the PID of the run in progress.
 
 Resume rules: a task marked done or failed is not run again, except that failed tasks
 are reset when the user agrees (cli.cmd_resume) and judge tasks always are. Inside a
-task that runs again only the items that are not final (orchestrator._final) are redone."""
+task that runs again only the items that are not final (is_final) are redone."""
 import copy
 import json
 import logging
@@ -153,29 +154,27 @@ class RunStore:
     def append(self, kind: str, record: dict):
         path = self.dir / "results" / f"{kind}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        # a line cut off by a crash must not swallow the next record
-        broken = False
         if path.exists() and path.stat().st_size > 0:
-            with open(path, "rb") as f:
-                f.seek(-1, os.SEEK_END)
-                broken = f.read(1) != b"\n"
+            _drop_cut_off_tail(path)  # a crash mid-write must not swallow the next record
         with open(path, "a", encoding="utf-8") as f:
-            f.write(("\n" if broken else "") + json.dumps(record, ensure_ascii=False) + "\n")
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
     def read(self, kind: str) -> list:
+        """Records in order. Lines are split on "\\n" only (a record may hold U+2028) and
+        decoded one by one, so a line cut inside a character costs that line only."""
         path = self.dir / "results" / f"{kind}.jsonl"
         if not path.exists():
             return []
         out = []
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_bytes().split(b"\n")
         for i, line in enumerate(lines):
             if not line.strip():
                 continue
             try:
-                out.append(json.loads(line))
-            except ValueError:
+                out.append(json.loads(line.decode("utf-8")))
+            except ValueError:  # UnicodeDecodeError is a ValueError too
                 if i == len(lines) - 1:
                     log.warning(f"Ignoring a cut-off last line in {path.name} (interrupted write)")
                 else:
@@ -189,6 +188,19 @@ class RunStore:
             if r.get("task") == task_id:
                 latest[r.get("key")] = r
         return {k for k, r in latest.items() if is_final(kind, r)}
+
+
+def _drop_cut_off_tail(path: Path):
+    """Cut a log back to its last complete line (a crash can leave half a record)."""
+    with open(path, "r+b") as f:
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) == b"\n":
+            return
+        f.seek(0)
+        data = f.read()
+        keep = data.rfind(b"\n") + 1
+        log.warning(f"Removing a cut-off last line from {path.name}: {data[keep:keep + 80]!r}")
+        f.truncate(keep)
 
 
 def is_final(kind: str, record: dict) -> bool:

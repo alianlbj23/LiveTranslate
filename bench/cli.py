@@ -113,15 +113,25 @@ def _download_all(con: Console, source_factory, log_path) -> int:
             log.error(f"Download of {key} stopped: {e}")
             con.say("", f"  網路錯誤：{e}", "  已下載的部分會保留，稍後再選 1 會從中斷的地方繼續。")
             return 1
+        except datasets.CodecError as e:
+            log.error(f"Download of {key} stopped: {e}")
+            con.say("", f"  這台電腦無法解碼下載的音檔：{e}",
+                    "  資料本身沒有問題，不要刪除已下載的資料。請重新執行安裝或更新（update.bat）修復音訊套件"
+                    f"（soundfile / librosa），再選 1 繼續；詳細原因在 {log_path}。")
+            return 1
         except datasets.DataError as e:
             log.error(f"Download of {key} stopped: {e}")
             con.say("", f"  資料集和預期的不同，重試也不會好：{e}",
                     f"  如果資料集更新過，刪除 {datasets.manifest_path(key)} 後再選 1 重新抽樣；"
                     f"其他情況請附上 {log_path} 回報問題。")
             return 1
-        except datasets.DownloadError as e:  # DiskError
+        except datasets.DiskError as e:
             log.error(f"Download of {key} stopped: {e}")
             con.say("", f"  寫入磁碟失敗：{e}", "  請確認磁碟空間和資料夾權限；已下載的部分會保留，之後再選 1 繼續。")
+            return 1
+        except datasets.DownloadError as e:
+            log.error(f"Download of {key} stopped: {e}")
+            con.say("", f"  下載停止：{e}", f"  已下載的部分會保留；詳細原因在 {log_path}。")
             return 1
         except Exception as e:  # e.g. a library missing after an update: no traceback, keep the log
             log.exception(f"Download of {key} failed")
@@ -183,7 +193,7 @@ def manifest_path(manifests: Path, model: str) -> Path:
     return manifests.joinpath(*rel, tag)
 
 
-def _reusable_stage1(chosen: list, counts: dict, data_ids: dict, asr_language: str):
+def _reusable_stage1_run(chosen: list, counts: dict, data_ids: dict, asr_language: str):
     """Newest run whose stage 1 finished for every ASR on the same clips (sampling
     method, revision, clip ids) with the same forced language, or None."""
     wanted = {c.id for c in ASR_CANDIDATES}
@@ -222,7 +232,7 @@ def build_plan(con: Console, settings: dict, quick: bool = False):
     data_ids = {k: datasets.sample_id(k, counts[k]) for k in chosen}
     reuse = None
     if 1 not in stages:
-        reuse = _reusable_stage1(chosen, counts, data_ids, settings.get("asr_language", "auto"))
+        reuse = _reusable_stage1_run(chosen, counts, data_ids, settings.get("asr_language", "auto"))
         if not reuse:
             con.say("沒有完整的第 1 階段結果可以沿用（要 4 個辨識模型都跑完，測試句子和指定的辨識語言都相同），"
                     "必須勾選階段 1。")
@@ -514,8 +524,12 @@ def _open(path: Path):
         print(f"請手動打開：{path}")
 
 
+CANCELLED = object()  # the user chose 0 (as opposed to "nothing to choose from")
+
+
 def _pick_run(con: Console, need_recs: bool = False):
-    """A RunStore of the 5 newest readable runs (with recommendations when asked), or None."""
+    """A RunStore of the 5 newest readable runs (with recommendations when asked), None
+    when there is none, or CANCELLED."""
     runs = []
     for run in state.RunStore.readable_runs():
         if need_recs and not ((run.dir / "recommendations.json").exists() and report.load_recs(run.dir)["items"]):
@@ -528,12 +542,13 @@ def _pick_run(con: Console, need_recs: bool = False):
         return None
     status_names = {"done": "完成", "interrupted": "中斷", "error": "錯誤"}
     options = [(run, f"{run.dir.name}（{status_names.get(run.state.get('status'), '未完成')}）") for run in runs]
-    return con.choose_one("選擇一次評測：", options, 0)
+    picked = con.choose_one("選擇一次評測：", options, 0)
+    return CANCELLED if picked is None else picked
 
 
 def cmd_report(con: Console) -> int:
     store = _pick_run(con)
-    if store is None:
+    if store is None or store is CANCELLED:
         return 0
     try:
         report.build(store)
@@ -565,7 +580,7 @@ def cmd_apply(con: Console) -> int:
 def _apply(con: Console) -> int:
     backups = settings_io.list_backups()
     run = _pick_run(con, need_recs=True)
-    if run is None and not backups:
+    if run is CANCELLED or (run is None and not backups):
         return 0
     recs = report.load_recs(run.dir) if run else {"items": [], "status": None}
     if run and recs["status"] != "done":

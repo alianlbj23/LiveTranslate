@@ -80,6 +80,23 @@ def test_run_store_appends_and_survives_a_cut_off_line(bench_dir):
     assert reopened.final_keys("asr", "s1/x") == {"a/1", "a/2", "a/3"}
 
 
+def test_run_store_survives_a_line_cut_inside_a_japanese_character(bench_dir):
+    """Review finding: a crash in the middle of a multi-byte character made the whole
+    log undecodable (read_text is strict), so report and resume failed for good; and a
+    record holding U+2028 was split in two by splitlines and lost."""
+    store = state.RunStore.create({"stages": [1]})
+    store.append("asr", {"task": "s1/x", "key": "a/1", "raw": "行 末"})
+    path = store.dir / "results" / "asr.jsonl"
+    with open(path, "ab") as f:
+        f.write('{"task": "s1/x", "key": "a/2", "raw": "本'.encode("utf-8")[:-1])  # cut inside 本
+    reopened = state.RunStore(store.dir)
+    assert [r["key"] for r in reopened.read("asr")] == ["a/1"]
+    assert reopened.read("asr")[0]["raw"] == "行 末"
+    reopened.append("asr", {"task": "s1/x", "key": "a/3"})
+    assert [r["key"] for r in reopened.read("asr")] == ["a/1", "a/3"]
+    assert b'"a/2"' not in path.read_bytes()  # the broken tail was cut off, not kept in the middle
+
+
 def test_run_store_tasks_and_frozen_values_persist(bench_dir):
     store = state.RunStore.create({"stages": [1]})
     store.set_task("s1/x", status="done", items_done=3)
@@ -164,7 +181,7 @@ def test_composite_formula_and_latency_anchors():
 def _combo(**kw):
     base = {"quality": 7.0, "cer": 0.1, "latency_ms": 1000.0, "vram_peak_mb": 8000.0, "fail_rate": 0.0}
     base.update(kw)
-    return scoring.judge_combo(base)
+    return scoring.evaluate_combo(base)
 
 
 def test_not_recommended_rules():
@@ -254,6 +271,17 @@ def test_calibration_flags_an_unreliable_judge():
     report = judge.calibration_report(recs)
     assert report["A"]["misses"] == 0
     assert report["B"]["misses"] == 3
+
+
+def test_calibration_counts_the_latest_answer_per_item():
+    """Review finding: a calibration item that failed once and was scored on resume was
+    counted twice (a miss plus a hit), and two such items flagged a good judge."""
+    good = {"accuracy": 9, "naturalness": 8, "tone": 8, "taiwan": 9}
+    records = [{"judge": "A", "item": judge.cal_key("cal-good"), "scores": None},
+               {"judge": "A", "item": judge.cal_key("cal-good2"), "scores": None},
+               {"judge": "A", "item": judge.cal_key("cal-good"), "scores": good},
+               {"judge": "A", "item": judge.cal_key("cal-good2"), "scores": good}]
+    assert judge.calibration_report(records) == {"A": {"misses": 0, "items": 2}}
 
 
 def test_sakura_cannot_judge():

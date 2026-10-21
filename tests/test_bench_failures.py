@@ -366,13 +366,13 @@ def test_reusing_stage1_requires_the_same_clips_and_language(world):
 
     chosen, counts = ["anime", "vtuber"], world["counts"]
     old_run()  # a run from before data_ids were recorded
-    assert cli._reusable_stage1(chosen, counts, ids, "ja") is None
+    assert cli._reusable_stage1_run(chosen, counts, ids, "ja") is None
     old_run(data_ids={**ids, "anime": {**ids["anime"], "clips": "another sample"}},
             settings_snapshot={"asr_language": "ja"})
-    assert cli._reusable_stage1(chosen, counts, ids, "ja") is None
+    assert cli._reusable_stage1_run(chosen, counts, ids, "ja") is None
     good = old_run(data_ids=ids, settings_snapshot={"asr_language": "ja"})
-    assert cli._reusable_stage1(chosen, counts, ids, "ja") == good
-    assert cli._reusable_stage1(chosen, counts, ids, "auto") is None
+    assert cli._reusable_stage1_run(chosen, counts, ids, "ja") == good
+    assert cli._reusable_stage1_run(chosen, counts, ids, "auto") is None
 
 
 def test_stage3_without_matching_stage1_records_fails_with_the_reason(world):

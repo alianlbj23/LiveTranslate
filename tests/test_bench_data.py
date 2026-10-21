@@ -380,6 +380,27 @@ def test_mostly_unusable_rows_stop_the_download_early(bench_dir):
     assert len(hub.group_reads) == 5  # 40 rows at 8 per group, not all 12 groups
 
 
+def test_audio_this_computer_cannot_decode_is_not_blamed_on_the_dataset(bench_dir, monkeypatch):
+    """Review finding: when most rows fail to decode (a broken audio library here), the
+    stop said the dataset was wrong and suggested deleting the manifest, which cannot
+    help."""
+    from bench import cli
+
+    _write_split(bench_dir, "test", files=4, raw={r: b"not audio at all" for r in range(120)})
+    with pytest.raises(ds.CodecError, match="40 of 40"):
+        ds.download_dataset("vtuber", LocalHub(bench_dir), n=12)
+    assert not json.loads(ds.manifest_path("vtuber").read_text(encoding="utf-8"))["skipped"]
+
+    def stop(*args, **kwargs):
+        raise ds.CodecError("vtuber: 40 of 40 rows unusable")
+
+    monkeypatch.setattr(ds, "download_dataset", stop)
+    out = []
+    assert cli.cmd_download(cli.Console(input_fn=lambda p: "", print_fn=out.append), source_factory=lambda k: None) == 1
+    text = "\n".join(out)
+    assert "解碼" in text and "manifest" not in text
+
+
 def test_undecodable_audio_is_skipped_for_this_download_only(bench_dir):
     """Decoding can fail because of this computer (a missing codec), so the row is not
     marked unusable for good: a later download tries it again."""

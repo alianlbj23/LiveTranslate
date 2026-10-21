@@ -761,13 +761,12 @@ class Bench:
             out = []
             for base, fut in jobs:
                 if fut is None:
-                    out.append({**base, "ok": False, "error": asr_runner.ASR_EMPTY, "ttft_ms": None, "tl_ms": None,
-                                "e2e_ms": None})
+                    out.append({**base, "ok": False, "text": "", "error": asr_runner.ASR_EMPTY, "ttft_ms": None,
+                                "total_ms": None, "e2e_ms": None})
                     continue
                 res, e2e_s = fut.result()
-                out.append({**base, "ok": res["ok"], "error": res["error"], "detail": res.get("detail"),
-                            "ttft_ms": res["ttft_ms"], "tl_ms": res["total_ms"], "e2e_ms": e2e_s * 1000,
-                            "translation": res["text"]})
+                # same field names as the tl records (text = the translation)
+                out.append({**base, **res, "e2e_ms": e2e_s * 1000})
             return out
         finally:
             pool.shutdown(wait=True)
@@ -800,7 +799,8 @@ class Bench:
             if not scored:
                 self._judge_translations(client, entry, jfp, assignment, task_id)
             if vad_pending and self.store.task(task_id)["status"] != "failed":
-                vad_pending = not self._judge_vad(client, entry)  # stopped: the next judge takes over
+                finished = self._judge_vad(client, entry)
+                vad_pending = not finished  # this judge was stopped: the next one takes over
         if vad_pending and self.store.task("s2judge")["status"] != "failed":
             self._fail_task("s2judge", "沒有可用的評審，第 2 階段的結果沒有評分", "語音偵測評分")
         self._clear_gpu("judges")

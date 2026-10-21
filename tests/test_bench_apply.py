@@ -189,6 +189,21 @@ def test_restoring_twice_still_returns_to_the_settings_before_the_apply(user_fil
     assert len(settings_io.list_backups(include_pre_restore=True)) == 3
 
 
+def test_cancelling_the_run_choice_leaves_the_menu(user_files):
+    """Review finding: 0 at "choose a run" looked like "no runs" and, with backups,
+    opened a menu holding only the restore."""
+    _run_with_recs(_pick())
+    assert _apply("", "", "y")[0] == 0  # leaves a backup behind
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return "0"
+
+    assert cli.cmd_apply(Console(input_fn=answer, print_fn=lambda s: None)) == 0
+    assert len(prompts) == 1
+
+
 def test_restore_works_when_the_settings_file_is_broken(user_files):
     """Review finding: the menu read the settings before offering R, so a broken file
     made the restore unreachable."""

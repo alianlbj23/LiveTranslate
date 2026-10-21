@@ -230,10 +230,12 @@ def judge_offsets(records: list) -> dict:
 
 
 def calibration_report(records: list) -> dict:
-    """judge -> {"misses": n, "items": n}; >= 2 misses flags the judge as unreliable."""
+    """judge -> {"misses": n, "items": n}; >= 2 misses flags the judge as unreliable.
+    Only the latest answer per (judge, item) counts (a resume scores failed items again)."""
     expect = {cid: exp for cid, _, _, exp in CALIBRATION}
+    latest = {(r["judge"], r["item"]): r for r in records}
     out = {}
-    for r in records:
+    for r in latest.values():
         if not r["item"].startswith(CAL_PREFIX):
             continue
         cid = r["item"][len(CAL_PREFIX):]

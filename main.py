@@ -456,7 +456,7 @@ class LiveTranslateApp:
     LANG_DROP_NOTICE_STREAK = 5       # this many dropped lines in a row: tell the user
     LANG_DROP_NOTICE_RECENT = (5, 20)  # or this many of the last N judged lines ...
     LANG_NOTICE_INTERVAL_S = 600.0     # ... at most once per interval
-    ASR_ERROR_NOTICE_STREAK = 3        # ASR loop errors in a row before a tray notice
+    ASR_ERROR_NOTICE_STREAK = 3        # ASR failures in a row before a tray notice
 
     def _init_language_filter_state(self):
         """Forced ASR language: lines heard in another language are dropped
@@ -467,7 +467,8 @@ class LiveTranslateApp:
         self._lang_notice_at = None
         self._asr_hint_missing = False  # the model got no prompt hint for the language
         self._asr_lang_support_key = None
-        self._asr_error_streak = 0
+        self._asr_failure_streak = 0      # failed transcribe calls in a row (_run_asr)
+        self._segment_failure_streak = 0  # other errors the ASR loop survived, in a row
 
     def _forced_asr_language(self) -> str:
         """The ASR language setting; "auto" when nothing is forced (or no panel yet)."""
@@ -1060,11 +1061,13 @@ class LiveTranslateApp:
         except (ASRWorkerExited, ASRWorkerTimeout) as exc:
             asr_ms = (time.perf_counter() - asr_start) * 1000
             self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
+            self._count_asr_failure()
             self._recover_asr_worker(client, str(exc))
             raise
         except ASRWorkerError as exc:
             asr_ms = (time.perf_counter() - asr_start) * 1000
             self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
+            self._count_asr_failure()
             fatal = False
             with self._asr_lock:
                 if self._asr is client:
@@ -1076,7 +1079,9 @@ class LiveTranslateApp:
         except Exception:
             asr_ms = (time.perf_counter() - asr_start) * 1000
             self._log_mem_after_asr(f"{kind}:error", audio_seconds, asr_ms)
+            self._count_asr_failure()
             raise
+        self._asr_failure_streak = 0
         with self._asr_lock:
             if self._asr is client:
                 self._asr_error_count = 0
@@ -2160,12 +2165,12 @@ class LiveTranslateApp:
                         self._process_interim_final(segment)
                     else:
                         self._process_segment(segment)
-                    self._asr_loop_ok()
+                    self._segment_failure_streak = 0
                 except Exception:
                     log.error("ASR segment processing failed", exc_info=True)
                     if self._interim_pending:
                         log.warning(f"Dropping the buffered short text after that error: {self._interim_pending[:60]}")
-                    self._asr_loop_failed()
+                    self._count_segment_failure()
                 self._interim_active = False
                 self._interim_pending = ""
                 self._last_interim_samples = 0
@@ -2175,23 +2180,31 @@ class LiveTranslateApp:
                 try:
                     self._drain_interim_duplicates()
                     self._do_interim_asr()
-                    self._asr_loop_ok()
+                    self._segment_failure_streak = 0
                 except Exception:
                     log.error("Interim ASR processing failed", exc_info=True)
-                    self._asr_loop_failed()
+                    self._count_segment_failure()
                 with self._vad_lock:
                     self._last_interim_samples = self._vad._speech_samples
 
-    def _asr_loop_ok(self):
-        self._asr_error_streak = 0
+    def _count_asr_failure(self):
+        """A failed transcribe (_run_asr; its callers catch and log it). Reset by the next
+        successful one."""
+        self._asr_failure_streak += 1
+        self._notice_failure_streak(self._asr_failure_streak, "ASR calls")
 
-    def _asr_loop_failed(self):
-        """Errors the loop survived: after a few in a row the subtitles have most likely
-        stopped, so tell the user instead of only logging."""
-        self._asr_error_streak += 1
-        if self._asr_error_streak == self.ASR_ERROR_NOTICE_STREAK:
-            log.error(f"{self._asr_error_streak} ASR segments in a row failed; subtitles may have stopped")
-            self._notify_user(t("asr_loop_error_msg").format(n=self._asr_error_streak))
+    def _count_segment_failure(self):
+        """An error the ASR loop survived outside _run_asr (e.g. in the filters). Reset
+        when a segment is handled without one."""
+        self._segment_failure_streak += 1
+        self._notice_failure_streak(self._segment_failure_streak, "ASR segments")
+
+    def _notice_failure_streak(self, streak: int, what: str):
+        """After a few failures in a row the subtitles have most likely stopped: tell the
+        user instead of only logging."""
+        if streak == self.ASR_ERROR_NOTICE_STREAK:
+            log.error(f"{streak} {what} in a row failed; subtitles may have stopped")
+            self._notify_user(t("asr_loop_error_msg").format(n=streak))
 
     def _drain_interim_duplicates(self):
         while True:

@@ -48,7 +48,7 @@ def rank_asr(stats: dict) -> list:
     return sorted(ranked, key=lambda a: (stats[a]["cer"], stats[a].get("mean_ms") or 0.0))
 
 
-def judge_combo(combo: dict) -> dict:
+def evaluate_combo(combo: dict) -> dict:
     """Fills composite, recommended, reasons, warnings. composite is not None only when
     quality, cer and latency_ms all are (recommend() relies on that)."""
     reasons, warnings = [], []

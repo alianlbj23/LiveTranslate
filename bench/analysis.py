@@ -18,8 +18,9 @@ Record kinds (results/<kind>.jsonl), written by bench.orchestrator; every record
                  ttft_ms, total_ms, error, detail
   tl_meta        per translation model: status, reason, load_s, errors, vram_peak_mb
   together       one sentence with ASR + translation loaded together, replayed in real
-                 time: asr, model, category, clip, source (this ASR's text), translation,
-                 ok, error, detail, queue_ms, asr_ms, ttft_ms, tl_ms, e2e_ms
+                 time: asr, model, category, clip, source (this ASR's text), and the tl
+                 fields (ok, text, ttft_ms, total_ms, error, detail) plus queue_ms,
+                 asr_ms, e2e_ms
   together_meta  per (ASR, model): status, reason, errors, vram_peak_mb
   judge          one judge score for one item (translation or calibration): judge,
                  item, candidate, category, scores (None = the judge failed), self
@@ -332,7 +333,7 @@ def combos(store) -> dict:
                     "fail_rate": t.get("fail_rate"), "together_fail_rate": tog.get("fail_rate"),
                     "quality_approx": asr != best, "data_notes": data_notes,
                 }
-                rows.append(scoring.judge_combo(combo))
+                rows.append(scoring.evaluate_combo(combo))
         rows.sort(key=lambda c: (c["composite"] is None, -(c["composite"] or 0)))
         out[cat] = rows
     return out
