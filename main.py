@@ -2436,12 +2436,19 @@ def main():
                     3000,
                 )
         else:
-            overlay.show()
-            overlay.raise_()
+            overlay.restore_window()
             overlay_toggle_action.setText(t("tray_hide_overlay"))
 
     overlay_toggle_action.triggered.connect(on_toggle_overlay)
     menu.addAction(overlay_toggle_action)
+
+    # Left click on the tray icon: minimize the overlay to the taskbar, or bring it back
+    def on_tray_activated(reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            overlay.toggle_from_tray()
+            overlay_toggle_action.setText(t("tray_hide_overlay"))
+
+    tray.activated.connect(on_tray_activated)
 
     # --- Subtitle window toggle ---
     def _save_overlay_pos():

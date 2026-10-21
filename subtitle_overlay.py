@@ -2,12 +2,13 @@ import ctypes
 import logging
 import os
 import re
+import time
 
 import psutil
 
 import system_stats
 from i18n import t, LANGUAGES
-from PyQt6.QtCore import QPoint, QPropertyAnimation, QEasingCurve, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QEvent, QPoint, QPropertyAnimation, QEasingCurve, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication,
@@ -38,6 +39,7 @@ from qfluentwidgets import (
 log = logging.getLogger("LiveTranslate.Overlay")
 
 _GWL_EXSTYLE = -20
+_TYPE_MASK = Qt.WindowType.WindowType_Mask
 _WS_EX_TRANSPARENT = 0x20
 
 # Translucent dark card: about 85 % opaque, 12 px corners; the header only tints the card
@@ -655,6 +657,7 @@ class DragHandle(QWidget):
     start_clicked = pyqtSignal()
     stop_clicked = pyqtSignal()
     clear_clicked = pyqtSignal()
+    minimize_clicked = pyqtSignal()
     quit_clicked = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "full" or "compact"
     position_changed = pyqtSignal()
@@ -751,6 +754,10 @@ class DragHandle(QWidget):
         self._settings_btn = _icon_button(FIF.SETTING, t("ovl_tip_settings"))
         self._settings_btn.clicked.connect(self.settings_clicked.emit)
         row1.addWidget(self._settings_btn)
+
+        self._minimize_btn = _icon_button(FIF.REMOVE, t("ovl_tip_minimize"))  # the usual "—" minimize glyph
+        self._minimize_btn.clicked.connect(self.minimize_clicked.emit)
+        row1.addWidget(self._minimize_btn)
 
         self._quit_btn = _icon_button(FIF.POWER_BUTTON, t("ovl_tip_quit"))
         self._quit_btn.setIcon(FIF.POWER_BUTTON.icon(color=_QUIT_ICON_COLOR))
@@ -1034,6 +1041,13 @@ class SubtitleOverlay(QWidget):
         self._messages = {}
         self._max_messages = 50
         self._click_through = False
+        # Tool flag dropped so the minimized window has a taskbar button; put back on restore
+        self._tool_flag_after_restore = False
+        self._tool_flag_timer = QTimer(self)
+        self._tool_flag_timer.setSingleShot(True)
+        self._tool_flag_timer.setInterval(0)
+        self._tool_flag_timer.timeout.connect(self._drop_taskbar_button)
+        self._last_tray_toggle = None
         self._height_before_compact = None
         self._mode_anim = None
         self._pos_save_timer = QTimer(self)
@@ -1105,6 +1119,7 @@ class SubtitleOverlay(QWidget):
         self._handle.stop_clicked.connect(self.stop_requested.emit)
         self._handle.clear_clicked.connect(self._on_clear)
         self._handle.quit_clicked.connect(self.quit_requested.emit)
+        self._handle.minimize_clicked.connect(self.minimize_to_taskbar)
         self._handle.mode_changed.connect(self._on_mode_changed)
         self._handle.position_changed.connect(self.position_changed)
         container_layout.addWidget(self._handle)
@@ -1229,12 +1244,71 @@ class SubtitleOverlay(QWidget):
         self.show()
 
     def _set_taskbar(self, enabled: bool):
-        flags = self.windowFlags()
+        if self.isMinimized():
+            # Keep the taskbar button while minimized; the choice applies on restore
+            self._tool_flag_after_restore = not enabled
+            return
+        self._tool_flag_after_restore = False  # applied now, nothing left for a restore
+        flags = self.windowFlags() & ~_TYPE_MASK
         if enabled:
-            flags &= ~Qt.WindowType.Tool
+            flags |= Qt.WindowType.Window
         else:
             flags |= Qt.WindowType.Tool
         self.setWindowFlags(flags)
+        self.show()
+
+    def minimize_to_taskbar(self):
+        """Minimize to the Windows taskbar. A Tool window has no taskbar button, so while
+        the Taskbar toggle is off it is a normal window until restored. Windows only
+        iconifies this frameless window with the minimize-button hint and after it is shown
+        again with the new flags."""
+        if self.isMinimized():
+            return
+        flags = self.windowFlags()
+        if (flags & _TYPE_MASK) == Qt.WindowType.Tool:
+            self._tool_flag_after_restore = True
+            flags = (flags & ~_TYPE_MASK) | Qt.WindowType.Window
+        flags |= Qt.WindowType.WindowMinimizeButtonHint
+        if flags != self.windowFlags():
+            self.setWindowFlags(flags)
+            self.show()
+        self.showMinimized()
+
+    def restore_window(self):
+        """Bring the window back from the taskbar or from being hidden (tray menu)."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+
+    def toggle_from_tray(self):
+        """Tray icon left click: minimize a shown window, bring back a minimized or hidden one.
+        A second click within the double-click interval is ignored, so a double click
+        does not minimize and restore at once."""
+        now = time.monotonic()
+        if (self._last_tray_toggle is not None
+                and now - self._last_tray_toggle < QApplication.doubleClickInterval() / 1000):
+            return
+        self._last_tray_toggle = now
+        if self.isVisible() and not self.isMinimized():
+            self.minimize_to_taskbar()
+        else:
+            self.restore_window()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if (event.type() == QEvent.Type.WindowStateChange and self._tool_flag_after_restore
+                and not self.isMinimized()):
+            # Restored (taskbar click or tray): changing flags inside this event is unsafe
+            self._tool_flag_timer.start()
+
+    def _drop_taskbar_button(self):
+        if not self._tool_flag_after_restore or self.isMinimized():
+            return
+        self._tool_flag_after_restore = False
+        flags = self.windowFlags() & ~Qt.WindowType.WindowMinimizeButtonHint
+        self.setWindowFlags((flags & ~_TYPE_MASK) | Qt.WindowType.Tool)
         self.show()
 
     def _set_click_through(self, enabled: bool):
