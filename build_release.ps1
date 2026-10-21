@@ -30,11 +30,16 @@ New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
 # ── 2. Export tracked source via git archive ──
 Write-Step "Exporting source (git archive HEAD)..."
-$Tar = Join-Path $OutDir "src.tar"
-& git archive --format=tar -o $Tar HEAD
+# zip, not tar: Windows' tar.exe cannot create the non-ASCII file names of a git tar
+# (快速開始.md was silently missing from the zip); Expand-Archive reads git's UTF-8 zip names
+$SrcZip = Join-Path $OutDir "src.zip"
+& git archive --format=zip -o $SrcZip HEAD
 if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
-& tar -x -f $Tar -C $Stage
-Remove-Item $Tar
+Expand-Archive -Path $SrcZip -DestinationPath $Stage
+Remove-Item $SrcZip
+$tracked = @(& git ls-tree -r --name-only HEAD).Count
+$exported = @(Get-ChildItem -LiteralPath $Stage -Recurse -File -Force).Count
+if ($exported -ne $tracked) { throw "source export is incomplete: $exported of $tracked files" }
 foreach ($d in $DropList) {
     $p = Join-Path $Stage $d
     if (Test-Path -LiteralPath $p) { Remove-Item -Recurse -Force -LiteralPath $p }
