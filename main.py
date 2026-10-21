@@ -50,6 +50,9 @@ from vad_processor import VADProcessor
 from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
 from translator import Translator, RepetitionError
 import local_models
+import local_model_prep
+import local_model_ui
+import ollama_server
 import asr_language
 from transcript_writer import TranscriptWriter
 
@@ -1935,10 +1938,18 @@ class LiveTranslateApp:
 
     def release_gpu(self):
         """Free GPU memory held on our behalf: unload the Ollama translation model
-        (keep_alive=0) when the API is a local Ollama. Safe to call more than once."""
+        (keep_alive=0) when the API is a local Ollama, and stop the Ollama started for this
+        session (an Ollama someone else started keeps running). Safe to call more than once."""
         if getattr(self, "_gpu_released", False):
             return
         self._gpu_released = True
+        self._unload_local_models()
+        pid = ollama_server.pid_file_server()
+        if pid:  # also after switching to a cloud model during the session
+            ollama_server.stop_ollama(pid)
+            log.info("Ollama stopped (it is started again on the next launch)")
+
+    def _unload_local_models(self):
         try:
             model = self._panel.get_active_model() if self._panel else None
             if not model:
@@ -2348,6 +2359,20 @@ def main():
     subwin = SubtitleWindow(subwin_cfg)
     subwin_was_enabled = (subwin_cfg or {}).get("enabled", False)
 
+    # Free graphics memory before the speech model loads: the start check compares it with
+    # what the speech + translation pair needs (the launcher measured it before starting us)
+    free_gb_at_start = local_model_prep.measure_free_gb(panel.get_settings())
+
+    def _notify_local_model(title, text, error):
+        tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Warning, 15000)
+        if error:
+            QMessageBox.warning(None, title, text)
+
+    local_starter = local_model_ui.LocalModelStarter(
+        apply_settings=panel.replace_local_models, warm=_warm_local_model, notify=_notify_local_model,
+        log_dir=Path(__file__).parent / "logs", free_gb_at_start=free_gb_at_start, parent=app,
+    )
+
     live_trans = LiveTranslateApp(config)
     live_trans.set_overlay(overlay)
     live_trans.set_subtitle_window(subwin)
@@ -2368,6 +2393,9 @@ def main():
         active_model = panel.get_active_model()
         if active_model:
             live_trans._on_model_changed(active_model)
+        if local_models.is_local_ollama(active_model):
+            # Ollama, a missing model and the model entries' port: was the launcher's console
+            local_starter.start(panel.get_settings(), active_model)
 
     QTimer.singleShot(100, _deferred_init)
 

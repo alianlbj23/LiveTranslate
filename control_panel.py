@@ -1449,6 +1449,19 @@ class ControlPanel(FluentWindow):
         if hasattr(self, "_home_model_card"):
             self._refresh_home_from_settings()
 
+    def replace_local_models(self, settings: dict):
+        """Take the model list and active model from `settings` (the local Ollama entries
+        pointed at the port the app started Ollama on) and apply them like an edit in the
+        list: saved, overlay combo updated, translator re-created."""
+        self._current_settings["models"] = list(settings.get("models", []))
+        self._current_settings["active_model"] = settings.get("active_model", 0)
+        self._refresh_model_list()
+        _save_settings(self._current_settings)
+        self._emit_models_list_changed()
+        active = self.get_active_model()
+        if active:
+            self.model_changed.emit(active)
+
     def _emit_models_list_changed(self):
         models = self._current_settings.get("models", [])
         active_idx = self._current_settings.get("active_model", 0)
