@@ -49,6 +49,7 @@ from audio_capture import AudioCapture
 from vad_processor import VADProcessor
 from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
 from translator import Translator, RepetitionError
+import app_launch
 import app_update_ui
 import local_models
 import local_model_prep
@@ -2909,6 +2910,17 @@ def main():
     panel.update_check_requested.connect(updater.check)
     panel.update_apply_requested.connect(updater.apply)
     QTimer.singleShot(15000, lambda: updater.check(quiet=True))
+
+    def _open_bench():
+        # The benchmark needs the whole card: open its window (no console), then quit
+        if not panel.confirm(t("bench_confirm_title"), t("bench_confirm_text")):
+            return
+        if not app_launch.open_bench_window():
+            tray.showMessage("LiveTranslate", t("bench_launch_failed"), QSystemTrayIcon.MessageIcon.Warning, 10000)
+            return
+        on_quit()
+
+    panel.bench_requested.connect(_open_bench)
 
     # --- Connect overlay signals ---
     overlay.settings_requested.connect(on_toggle_panel)

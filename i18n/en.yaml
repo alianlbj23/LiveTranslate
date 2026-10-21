@@ -475,3 +475,11 @@ update_restart_failed: "Updated, but LiveTranslate could not restart itself; clo
 update_confirm_title: "Update LiveTranslate"
 update_confirm_text: "Download {n} new versions and restart LiveTranslate? Translation stops for a few seconds; reinstalling changed packages can take a few minutes."
 update_tray: "{n} new versions on GitHub; update in Settings → Home → Maintenance."
+
+# Best-combination benchmark (Settings → Home → Maintenance)
+label_bench: "Best-combination benchmark"
+desc_bench: "Find the speech + translation combination that suits this computer best, with test data (LiveTranslate closes while it runs)"
+btn_bench: "Open benchmark"
+bench_confirm_title: "Best-combination benchmark"
+bench_confirm_text: "The benchmark needs the whole graphics card, so LiveTranslate closes first; the benchmark window can open it again. Continue?"
+bench_launch_failed: "Cannot open the benchmark window; see the log for details."

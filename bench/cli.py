@@ -1,5 +1,6 @@
-"""Benchmark menu actions, called by launcher/bench.ps1 through launcher/bench_run.py.
-The user never types these commands: each menu item runs one of them.
+"""Benchmark actions, run by the benchmark window (bench/window.py) through
+launcher/bench_run.py <command> --json (prompts as JSON lines, bench/gui_protocol.py), or
+in a console without --json. The user never types these commands: each button runs one.
 
   status    one-line-per-item summary for the menu header
   download  1) download the test data
@@ -637,10 +638,22 @@ def main(argv=None) -> int:
         except (AttributeError, ValueError) as e:
             log.debug(f"Could not switch {stream} to UTF-8: {e}")
     _setup_logging()
+    as_json = "--json" in argv
+    argv = [a for a in argv if a != "--json"]
     if not argv or argv[0] not in COMMANDS:
-        print("用法：bench_run.py " + " | ".join(COMMANDS))
+        print("用法：bench_run.py " + " | ".join(COMMANDS) + " [--json]")
         return 2
-    con = Console()
+    if as_json:
+        from bench.gui_protocol import JsonConsole, ProgressStream
+
+        try:
+            sys.stdin.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError) as e:
+            log.debug(f"Could not switch stdin to UTF-8: {e}")
+        con = JsonConsole(sys.stdout, sys.stdin)
+        sys.stdout = ProgressStream(con.send)  # "\r" progress lines and stray prints become messages
+    else:
+        con = Console()
     if argv[0] == "start":
         return cmd_start(con, quick="--quick" in argv)
     return COMMANDS[argv[0]](con)

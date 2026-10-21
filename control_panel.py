@@ -193,6 +193,7 @@ class ControlPanel(FluentWindow):
     local_model_requested = pyqtSignal(str)  # catalog model to use (downloaded first when needed)
     update_check_requested = pyqtSignal()
     update_apply_requested = pyqtSignal()
+    bench_requested = pyqtSignal()
     models_list_changed = pyqtSignal(list, int)
     subtitle_settings_changed = pyqtSignal(dict)
     _bench_result = pyqtSignal(str)
@@ -410,6 +411,9 @@ class ControlPanel(FluentWindow):
         update_row.addWidget(self._update_apply_btn)
         self._update_card = _WidgetCard(FIF.SYNC, t("label_update"), update_box, content=t("update_not_checked"))
         maint.addSettingCard(self._update_card)
+        self._bench_btn = PushButton(t("btn_bench"))
+        self._bench_btn.clicked.connect(self.bench_requested.emit)
+        maint.addSettingCard(_WidgetCard(FIF.SPEED_HIGH, t("label_bench"), self._bench_btn, content=t("desc_bench")))
         self._factory_reset_btn = PushButton(t("btn_factory_reset"))
         self._factory_reset_btn.clicked.connect(self._on_factory_reset_clicked)
         maint.addSettingCard(_WidgetCard(

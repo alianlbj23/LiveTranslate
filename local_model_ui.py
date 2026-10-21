@@ -27,6 +27,9 @@ class ModelPullDialog(QDialog):
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("lm_ask_title"))
+        # The app's Fluent theme is dark; a plain dialog would follow the system's light palette
+        self.setObjectName("modelPullDialog")
+        self.setStyleSheet("#modelPullDialog { background-color: #202020; }")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
         self.setMinimumWidth(420)
         lay = QVBoxLayout(self)

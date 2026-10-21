@@ -48,6 +48,9 @@ class EnvCheckDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(t("env_title"))
         self.resize(640, 520)
+        # The app's Fluent theme is dark; a plain dialog would follow the system's light palette
+        self.setObjectName("envCheckDialog")
+        self.setStyleSheet("#envCheckDialog { background-color: #202020; }")
         self._run_all = run_all or env_check.run_all
         self.results = []
         lay = QVBoxLayout(self)

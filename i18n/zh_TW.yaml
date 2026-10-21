@@ -474,3 +474,11 @@ update_restart_failed: "已更新，但無法自動重新啟動；請關閉 Live
 update_confirm_title: "更新 LiveTranslate"
 update_confirm_text: "要下載 {n} 個新版本並重新啟動 LiveTranslate 嗎？翻譯會中斷十幾秒；如果套件有變動，重新安裝可能需要幾分鐘。"
 update_tray: "GitHub 上有 {n} 個新版本，可以到 設定 → 首頁 → 維護 更新。"
+
+# Best-combination benchmark (Settings → Home → Maintenance)
+label_bench: "最佳組合評測"
+desc_bench: "用測試資料找出這台電腦最適合的辨識＋翻譯組合（評測時 LiveTranslate 會關閉）"
+btn_bench: "開啟評測"
+bench_confirm_title: "最佳組合評測"
+bench_confirm_text: "評測會用到整張顯示卡，所以 LiveTranslate 會先關閉；評測視窗裡可以再把它開回來。要繼續嗎？"
+bench_launch_failed: "無法開啟評測視窗，詳細原因在記錄檔。"
