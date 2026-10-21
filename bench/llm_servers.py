@@ -79,16 +79,23 @@ class Ollama:
             log.debug(f"Ollama not answering at {self.root}: {e}")
             return False
 
+    def _models(self, path: str) -> list:
+        """Model names from /api/tags or /api/ps; an HTTP error raises (it must not read
+        as "no models")."""
+        resp = self._http.get(f"{self.root}{path}", timeout=5.0)
+        resp.raise_for_status()
+        return [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+
     def installed(self) -> set:
-        data = self._http.get(f"{self.root}/api/tags", timeout=5.0).json()
-        return {m.get("name") for m in data.get("models", []) if m.get("name")}
+        return set(self._models("/api/tags"))
 
     def loaded(self) -> list:
-        data = self._http.get(f"{self.root}/api/ps", timeout=5.0).json()
-        return [m.get("name") for m in data.get("models", []) if m.get("name")]
+        return self._models("/api/ps")
 
     def unload(self, model: str):
-        self._http.post(f"{self.root}/api/generate", json={"model": model, "keep_alive": 0}, timeout=30.0)
+        resp = self._http.post(f"{self.root}/api/generate", json={"model": model, "keep_alive": 0}, timeout=30.0)
+        if resp.status_code != 200:
+            log.warning(f"Ollama could not unload {model}: HTTP {resp.status_code} {resp.text[:200]}")
 
     def unload_all(self, timeout: float = 30.0, sleep=time.sleep) -> bool:
         """True when /api/ps is empty within `timeout`."""
@@ -198,13 +205,18 @@ def stop_ollama(pid: int):
 
 
 def lmstudio_unload_all() -> bool:
-    """`lms unload --all` when the LM Studio CLI is installed; False when it is not."""
+    """`lms unload --all` when the LM Studio CLI is installed. False (logged) when it is
+    not installed or failed: the next measurement then waits for VRAM instead."""
     lms = shutil.which("lms")
     if not lms:
+        log.info("LM Studio has no CLI (lms); waiting for VRAM instead of unloading")
         return False
     try:
-        subprocess.run([lms, "unload", "--all"], capture_output=True, timeout=60, check=False)
-        return True
+        done = subprocess.run([lms, "unload", "--all"], capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired) as e:
         log.warning(f"lms unload failed: {e}")
         return False
+    if done.returncode != 0:
+        log.warning(f"lms unload --all exited with {done.returncode}: {(done.stderr or done.stdout or '').strip()[:200]}")
+        return False
+    return True

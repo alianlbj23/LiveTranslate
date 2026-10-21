@@ -4,8 +4,8 @@ applies, so CER is measured on what would actually be shown.
 
 Copied from main.py (tests/test_bench_asr.py compares them against main.py so they cannot
 drift silently): the worker_config keys (LiveTranslateApp._switch_asr_engine), the
-sentence splitter (_split_sentences) and the punctuation / noise / language filters
-(_process_segment, _without_other_language)."""
+sentence splitter (_split_sentences) and the punctuation / noise filters
+(_process_segment). The language filter itself is shared (asr_language)."""
 import logging
 import subprocess
 import sys
@@ -22,26 +22,43 @@ TURBO_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
 ASR_EMPTY = "asr_empty"  # error of a translation record whose ASR showed nothing (not a model failure)
 
 
+ENGINE_TYPES = ("funasr", "anime-whisper", "whisper")  # also the app's asr_engine values
+
+
 @dataclass(frozen=True)
 class AsrCandidate:
     id: str
     label: str
     engine_type: str
     funasr_model: str | None = None
-    whisper: str | None = None  # "turbo"
+    download_bytes: int = 0         # rough size, for the "download first?" question
+    default_item_s: float = 0.5     # seconds per sentence before anything was measured
+
+    def __post_init__(self):
+        if self.engine_type not in ENGINE_TYPES:
+            raise ValueError(f"{self.id}: unknown engine type {self.engine_type!r}")
+        if (self.engine_type == "funasr") != bool(self.funasr_model):
+            raise ValueError(f"{self.id}: funasr_model is required for FunASR models and only for them")
+
+    def app_settings(self) -> dict:
+        """The user_settings.json keys that select this ASR in LiveTranslate (Whisper
+        turbo also needs whisper_model_size, the local folder: settings_io adds it)."""
+        out = {"asr_engine": self.engine_type}
+        if self.funasr_model:
+            out["funasr_model"] = self.funasr_model
+        return out
 
 
 ASR_CANDIDATES = [
-    AsrCandidate("sensevoice", "SenseVoice Small", "funasr", funasr_model="sensevoice-small"),
-    AsrCandidate("mlt-nano", "Fun-ASR-MLT-Nano", "funasr", funasr_model="funasr-mlt-nano-2512"),
-    AsrCandidate("anime-whisper", "Anime-Whisper", "anime-whisper"),
-    AsrCandidate("whisper-turbo", "Whisper large-v3-turbo", "whisper", whisper="turbo"),
+    AsrCandidate("sensevoice", "SenseVoice Small", "funasr", funasr_model="sensevoice-small",
+                 download_bytes=900_000_000, default_item_s=0.15),
+    AsrCandidate("mlt-nano", "Fun-ASR-MLT-Nano", "funasr", funasr_model="funasr-mlt-nano-2512",
+                 download_bytes=3_500_000_000, default_item_s=0.6),
+    AsrCandidate("anime-whisper", "Anime-Whisper", "anime-whisper", download_bytes=1_600_000_000, default_item_s=0.5),
+    AsrCandidate("whisper-turbo", "Whisper large-v3-turbo", "whisper", download_bytes=1_600_000_000,
+                 default_item_s=0.35),
 ]
 CANDIDATES_BY_ID = {c.id: c for c in ASR_CANDIDATES}
-
-# Rough download sizes for the "download first?" question (bytes)
-DOWNLOAD_BYTES = {"sensevoice": 900_000_000, "mlt-nano": 3_500_000_000,
-                  "anime-whisper": 1_600_000_000, "whisper-turbo": 1_600_000_000}
 
 
 def find_turbo_path() -> str | None:
@@ -138,57 +155,26 @@ def split_sentences(text: str, lang: str = "en") -> list:
     return parts
 
 
-def _engine_label(label):
-    return label if label and label not in ("auto", "unknown") else None
-
-
-def _heard_other(text, label, forced, hint_missing=False):
-    import asr_language
-
-    if forced == "auto":
-        return None
-    engine_label = _engine_label(label)
-    if engine_label and engine_label != forced:
-        return engine_label
-    if hint_missing:
-        return None
-    heard = asr_language.script_language(text, forced)
-    return heard if heard != forced else None
-
-
-def without_other_language(text: str, label: str, forced: str, hint_missing: bool = False) -> tuple[str, list]:
-    """main.py _without_other_language: (kept text, [(dropped sentence, heard language)])."""
-    import asr_language
-
-    if forced == "auto":
-        return text, []
-    engine_label = _engine_label(label)
-    if (engine_label and engine_label != forced) or hint_missing or forced not in asr_language.SCRIPT_CHECKED_LANGUAGES:
-        heard = _heard_other(text, label, forced, hint_missing)
-        return ("", [(text, heard)]) if heard else (text, [])
-    parts = [p.strip() for p in split_sentences(text, forced) if p.strip()]
-    if len(parts) <= 1:
-        parts = [text]
-    kept, dropped = [], []
-    for part in parts:
-        heard = _heard_other(part, label, forced, hint_missing)
-        (dropped.append((part, heard)) if heard else kept.append(part))
-    if not dropped:
-        return text, []
-    return ("" if forced == "ja" else " ").join(kept), dropped
-
-
 def displayed_text(text: str, label: str, seg_seconds: float, forced: str, hint_missing: bool = False) -> tuple[str, str | None]:
     """What the app would show for an ASR result: (text, reason it was cut or None)."""
+    import asr_language
+
     text = (text or "").strip()
     if not text or not any(c.isalnum() for c in text):
         return "", "empty"
     if seg_seconds >= 2.0 and sum(1 for c in text if c.isalnum()) <= 3:
         return "", "noise"
-    kept, dropped = without_other_language(text, label, forced, hint_missing)
+    kept, dropped = asr_language.without_other_language(text, label, forced, split_sentences, hint_missing)
     if not kept:
         return "", f"language:{dropped[0][1]}"
     return kept, (f"language-partial:{dropped[0][1]}" if dropped else None)
+
+
+def result_text(result) -> tuple[str, str]:
+    """(text, language label) of an ASR result; ("", "") for None."""
+    if not result:
+        return "", ""
+    return result.get("text", ""), result.get("language", "")
 
 
 def warm_up_filters(forced: str):
@@ -198,15 +184,14 @@ def warm_up_filters(forced: str):
 
 
 def hint_missing_for(cand: AsrCandidate, forced: str) -> bool:
-    """main.py _note_asr_language_support: Fun-ASR-Nano family without a prompt name."""
-    if cand.engine_type != "funasr" or forced == "auto":
+    """Whether the model cannot be told the forced language (asr_language.hint_missing,
+    as main.py's _note_asr_language_support decides it)."""
+    if cand.engine_type != "funasr":
         return False
     import asr_language
     from model_manager import funasr_profile
 
-    profile = funasr_profile(cand.funasr_model)
-    return profile.get("family") == "funasr-nano" and \
-        asr_language.prompt_language_name(profile["legacy_engine"], forced) is None
+    return asr_language.hint_missing(funasr_profile(cand.funasr_model), forced)
 
 
 # ---------------------------------------------------------------- session

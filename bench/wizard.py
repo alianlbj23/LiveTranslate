@@ -1,5 +1,14 @@
 """Console prompts for the benchmark menu: numbered single / multi choice and yes / no.
 Input and output are injectable so the flows can be tested without a terminal."""
+from typing import Any, NamedTuple
+
+
+class Option(NamedTuple):
+    """One line of choose_many (plain 4-tuples work too)."""
+    key: Any
+    label: str
+    enabled: bool = True
+    note: str = ""
 
 
 class Console:

@@ -213,6 +213,75 @@ def test_asr_loop_survives_a_processing_error(caplog):
     assert app._interim_pending == ""
 
 
+def test_asr_errors_in_a_row_notify_the_tray_once(caplog):
+    """Review finding: the loop guard only logged, so a systematic error (every segment
+    failing) stopped the subtitles without telling the user."""
+    import threading
+
+    app = _app()
+    app._running = True
+    app._asr_queue = queue.Queue()
+    app._vad_lock = threading.Lock()
+    app._last_interim_samples = 0
+    app._last_interim_check_time = 0.0
+    app._interim_active = False
+    notices = []
+    app._lang_notice_callback = notices.append
+    outcome = {"fail": True}
+
+    def segment(audio):
+        if outcome["fail"]:
+            raise RuntimeError("boom")
+
+    app._process_segment = segment
+
+    def run(n):
+        for _ in range(n):
+            app._asr_queue.put(("vad_flush", np.zeros(1600, dtype=np.float32)))
+        app._asr_queue.put(None)
+        app._asr_loop()
+
+    with caplog.at_level(logging.ERROR, logger="LiveTranslate"):
+        run(5)
+    assert len(notices) == 1 and "3" in notices[0]
+    outcome["fail"] = False
+    run(1)  # a good segment ends the streak
+    outcome["fail"] = True
+    run(3)
+    assert len(notices) == 2
+
+
+def test_lines_dropped_now_and_then_notify_too():
+    """Review finding: only five drops in a row raised a notice, so a model answering
+    every second or third line in Korean never told the user why lines were missing."""
+    app = _app()
+    app._panel = _Panel("ja")
+    app._transcript = _Recorder()
+    notices = []
+    app._lang_notice_callback = notices.append
+    for _ in range(10):
+        app._process_segment_text("위여 가자 빨리 가자 친구들", "ja")
+        app._process_segment_text("本当にそう思う", "ja")
+    assert len(notices) == 1 and "ko" in notices[0]  # once, not again within the interval
+
+
+def test_shared_filter_matches_the_rules():
+    import asr_language
+
+    split = _split
+    assert asr_language.without_other_language("はい。위여 가자 친구들。", "ja", "ja", split) == (
+        "はい。", [("위여 가자 친구들。", "ko")])
+    assert asr_language.without_other_language("你好。我们走吧。", "zh", "ja", split) == (
+        "", [("你好。我们走吧。", "zh")])
+    assert asr_language.without_other_language("위여 가자", "ja", "auto", split) == ("위여 가자", [])
+    assert asr_language.without_other_language("위여 가자", "ko", "ko", split, hint_missing=True) == ("위여 가자", [])
+    assert asr_language.engine_label("unknown") is None and asr_language.engine_label("ja") == "ja"
+    nano = {"family": "funasr-nano", "legacy_engine": "funasr-nano"}
+    assert asr_language.hint_missing(nano, "ko") and not asr_language.hint_missing(nano, "ja")
+    assert not asr_language.hint_missing({"family": "sensevoice"}, "ko")
+    assert not asr_language.hint_missing(nano, "auto")
+
+
 def test_whole_segment_keeps_japanese_and_drops_the_korean_sentence(caplog):
     """Non-incremental path (_process_segment): a mixed segment is judged per sentence too.
     Kana + kanji (13) outnumber Hangul (11), so judging the whole text let Korean through."""

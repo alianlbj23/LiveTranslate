@@ -1,9 +1,12 @@
 """report.html (self-contained, inline CSS, no JavaScript), results.csv (UTF-8 with BOM
-for Excel) and recommendations.json (read by "apply recommendation")."""
+for Excel) and recommendations.json (read back by "apply recommendation" through
+load_recs, which checks every item)."""
 import csv
 import html
 import json
+import logging
 from datetime import datetime
+from pathlib import Path
 
 from bench import analysis
 from bench import judge as judge_mod
@@ -11,13 +14,22 @@ from bench.asr_runner import CANDIDATES_BY_ID
 from bench.datasets import DATASETS
 from bench.settings_io import setup_steps
 
+log = logging.getLogger("LiveTranslate.Bench.Report")
+
+RECS_VERSION = 2
+REC_FIELDS = {"id": str, "kinds": list, "category": str, "asr": str, "asr_label": str,
+              "vad_threshold": (int, float), "vad_measured": bool, "tl_fp": str, "tl_name": str,
+              "tl_model": str, "recommended": bool}
+LARGE_OFFSET = 1.0  # judge scale offset (points) worth a warning
+
 NOTES = [
     "Anime-Whisper 的訓練資料和動畫測試集（japanese-anime-speech）類似，它在動畫類的分數可能偏高。",
     "ReazonSpeech 是電視節目語音，只能近似 VTuber 直播（口語、背景音樂、多人聊天都不同）。",
     "翻譯時不帶上下文（測試句彼此無關），實際使用時有上下文，品質可能略好。",
     "沒有模擬漸進式辨識與即時預覽：實際使用時多出的預覽翻譯會占用模型，延遲可能比這裡高。",
     "總延遲 = 排隊 + 辨識 + 整句翻譯的平均（ASR 與翻譯模型同時載入、照真實時間重播）；"
-    "語音偵測判斷一句結束要等的靜音（約 0.5 秒）每個組合都一樣，另外列出、不算進去。",
+    "同時載入時翻譯失敗的句子以「翻譯逾時 + 辨識時間」計入。"
+    "語音偵測判斷一句結束要等的靜音（約 0.5 秒）每個組合都一樣，不算進去。",
     "CER 以實際會顯示的字幕計算（標點、雜音、語言過濾後）；SenseVoice 會把數字轉成阿拉伯數字，"
     "和用漢字數字的標準答案比對時 CER 會偏高。",
     "顯示記憶體是整張顯示卡的用量，其他程式（瀏覽器、桌布）也會算進去。",
@@ -61,6 +73,10 @@ def mb(x) -> str:
     return "—" if x is None else f"{x / 1024:.1f} GB"
 
 
+def secs(x) -> str:
+    return "—" if x is None else f"{x:.1f} 秒"
+
+
 def asr_label(asr_id) -> str:
     c = CANDIDATES_BY_ID.get(asr_id)
     return c.label if c else str(asr_id)
@@ -81,50 +97,68 @@ def _table(headers, rows, num_cols=()) -> str:
 def build(store) -> dict:
     """Write report.html, results.csv and recommendations.json; returns the
     recommendations."""
-    plan = store.plan
-    asr_t = analysis.asr_table(store)
-    rankings = store.state.get("frozen", {}).get("rankings") or analysis.asr_rankings(store)
-    vad_t = analysis.vad_table(store)
-    best_th = analysis.best_vad_thresholds(store)
-    tl_t = analysis.tl_table(store)
-    q_t = analysis.quality_table(store)
+    rankings = analysis.frozen_rankings(store)
     combo_t = analysis.combos(store)
     recs = analysis.recommendations(store, combo_t)
     calib = judge_mod.calibration_report(store.read("judge"))
-    names = {m["fp"]: m["name"] for m in plan.get("tl_models", [])}
+    scale = analysis.judge_scale(store)
+    names = {m["fp"]: m["name"] for m in store.plan["tl_models"]}
 
     parts = [f"<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'>"
              f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
              f"<title>最佳組合評測報告</title><style>{CSS}</style></head><body><main>",
-             "<h1>最佳組合評測報告</h1>",
-             f"<p class='muted'>執行：{e(store.dir.name)}｜狀態：{e(store.state.get('status'))}｜"
-             f"產生時間：{datetime.now():%Y-%m-%d %H:%M}｜版本：{e(plan.get('git_rev', '?'))}｜"
-             f"評審：{e('、'.join(names.get(j, j) for j in plan.get('judges', [])) or '無')}"
-             f"（{'交叉評審' if plan.get('judge_mode') == 'cross' else '單一評審'}）</p>"]
+             "<h1>最佳組合評測報告</h1>"]
+    parts += _header(store, calib, scale, names)
+    parts += _recommendations_section(recs)
+    parts += _stage1_section(store, rankings)
+    parts += _stage2_section(store)
+    parts += _stage3_section(store, rankings)
+    parts += _combos_section(combo_t)
+    parts += _judges_section(store, calib, scale, names)
+    parts.append("<h2>注意事項</h2><ul>" + "".join(f"<li>{e(n)}</li>" for n in NOTES) + "</ul>")
+    parts.append("</main></body></html>")
+    (store.dir / "report.html").write_text("".join(parts), encoding="utf-8")
+    _write_csv(store.dir / "results.csv", combo_t)
+    _write_recs(store, recs)
+    return recs
 
+
+# ---------------------------------------------------------------- sections
+
+def _header(store, calib, scale, names) -> list:
+    plan = store.plan
+    parts = [f"<p class='muted'>執行：{e(store.dir.name)}｜狀態：{e(store.state.get('status'))}｜"
+             f"產生時間：{datetime.now():%Y-%m-%d %H:%M}｜版本：{e(plan.get('git_rev', '?'))}｜"
+             f"評審：{e('、'.join(names.get(j, j) for j in plan['judges']) or '無')}"
+             f"（{'交叉評審' if plan['judge_mode'] == 'cross' else '單一評審'}）</p>"]
     status = store.state.get("status")
     if status != "done":
         what = {"interrupted": "中斷", "error": "因錯誤停止", "running": "還在進行或被強制關閉"}.get(status, status)
         err = store.state.get("error")
         parts.append(f"<div class='banner'>評測沒有跑完（{e(what)}），以下結果不完整，推薦只能參考。"
                      + (f"<br>錯誤：{e(err)}" if err else "") + "</div>")
-    frozen = store.state.get("frozen", {})
-    if frozen.get("vram_baseline_mb") is None and store.read("asr_meta"):
+    if store.frozen("vram_baseline_mb") is None and store.read("asr_meta"):
         parts.append("<div class='banner'>讀不到顯示卡的記憶體用量（NVML），顯示記憶體欄位空白，11 GB 的檢查沒有做。</div>")
     settle = store.state.get("settle_issues") or []
     if settle:
         parts.append(f"<div class='banner'>有 {len(settle)} 次換模型時顯示記憶體沒有完全回落（其他程式也在用顯示卡？），"
                      "之後的顯示記憶體峰值可能偏高。</div>")
-
     unreliable = [j for j, s in calib.items() if s["misses"] >= 2]
     if unreliable:
         parts.append("<div class='banner'>評審可能不可靠：" + e("、".join(names.get(j, j) for j in unreliable))
                      + " 在已知答案的校準題中有 2 題以上不符預期，翻譯品質分數僅供參考。</div>")
-    if plan.get("quick"):
+    far = [j for j, s in scale.items() if abs(s["offset"]) > LARGE_OFFSET]
+    if far:
+        parts.append("<div class='banner'>評審的給分尺度差很多（" + e("、".join(
+            f"{names.get(j, j)} {scale[j]['offset']:+.1f} 分" for j in far))
+            + "），對齊後超出 1–10 分的分數已夾回範圍內，兩端的差距會被壓縮。細節見「評審校準」。</div>")
+    if plan["quick"]:
         parts.append("<div class='banner'>這是快速測試（每類只測少量句子），結果只用來確認流程。</div>")
+    return parts
 
-    # ---------------------------------------------------------- recommendations
-    parts.append("<h2>推薦組合</h2>")
+
+def _recommendations_section(recs) -> list:
+    parts = ["<h2>推薦組合</h2>"]
     for cat in analysis.CATEGORIES:
         picks = recs.get(cat) or []
         parts.append(f"<h3>{e(analysis.CATEGORY_LABELS[cat])}</h3>")
@@ -136,70 +170,83 @@ def build(store) -> dict:
         parts.append("<div class='cards'>")
         for p in picks:
             c = p["combo"]
-            steps = setup_steps(c["asr"], c["vad_threshold"], c["tl_name"], p["id"])
+            steps = setup_steps(c["asr"], c["vad_threshold"] if c["vad_measured"] else None, c["tl_name"], p["id"])
             flags = "".join(f"<div class='warn'>⚠ {e(w)}</div>" for w in c["warnings"])
             flags += "".join(f"<div class='bad'>✗ {e(r)}</div>" for r in c["reasons"])
+            vad = f"VAD 閾值 {num(c['vad_threshold'])}" if c["vad_measured"] else "VAD 閾值維持目前的設定（未實測）"
             parts.append(
                 f"<div class='card'><h4>{e(p['id'])}　" + "".join(f"<span class='tag'>{e(k)}</span>" for k in p["kinds"])
-                + f"</h4><div>辨識：<b>{e(asr_label(c['asr']))}</b>｜VAD 閾值 {num(c['vad_threshold'])}"
-                + ("" if c["vad_measured"] else "（未實測，建議預設 0.5）")
+                + f"</h4><div>辨識：<b>{e(asr_label(c['asr']))}</b>｜{vad}"
                 + f"<br>翻譯：<b>{e(c['tl_name'])}</b></div>"
                 f"<div class='muted'>綜合 {num(c['composite'], 1)}｜品質 {num(c['quality'])}/10｜CER {pct(c['cer'])}｜"
                 f"總延遲 {ms(c['latency_ms'])}｜顯示記憶體峰值 {mb(c['vram_peak_mb'])}</div>{flags}"
                 f"<ol>" + "".join(f"<li>{e(s)}</li>" for s in steps) + "</ol></div>")
         parts.append("</div>")
+    return parts
 
-    # ---------------------------------------------------------- stage 1
-    parts.append("<h2>階段 1｜語音辨識</h2>")
-    for dataset in plan.get("datasets", []):
+
+def _stage1_section(store, rankings) -> list:
+    asr_t = analysis.asr_table(store)
+    parts = ["<h2>階段 1｜語音辨識</h2>"]
+    for dataset in store.plan["datasets"]:
         rows = []
         ranked = rankings.get(dataset, [])
         for asr, s in sorted(asr_t.get(dataset, {}).items(),
                              key=lambda kv: (kv[1].get("cer") is None, kv[1].get("cer") or 0)):
             rank = f"{ranked.index(asr) + 1}" if asr in ranked else "—"
-            status = "<span class='ok'>完成</span>" if s.get("complete") else \
+            state = "<span class='ok'>完成</span>" if s.get("complete") else \
                 f"<span class='bad'>不排名：{e(s.get('reason') or '沒有跑完')}</span>"
             if s.get("errors"):
-                status += f"<br><span class='warn'>{s['errors']} 句辨識出錯（算全錯）</span>"
+                state += f"<br><span class='warn'>{s['errors']} 句辨識出錯（算全錯）</span>"
             rows.append([rank, e(asr_label(asr)), pct(s.get("cer")), pct(s.get("cer_raw")), ms(s.get("mean_ms")),
-                         ms(s.get("p90_ms")), mb(s.get("vram_peak_mb")), num(s.get("load_s"), 1) + " 秒"
-                         if s.get("load_s") is not None else "—", str(s.get("n", 0)), status])
+                         ms(s.get("p90_ms")), mb(s.get("vram_peak_mb")), secs(s.get("load_s")), str(s.get("n", 0)),
+                         state])
         parts.append(f"<h3>{e(DATASETS.get(dataset, {}).get('label', dataset))}</h3>")
         parts.append(_table(["排名", "辨識模型", "CER（字幕）", "CER（原始）", "平均延遲", "P90 延遲",
                              "顯示記憶體峰值", "載入時間", "句數", "狀態"], rows, num_cols=(2, 3, 4, 5, 6, 8)))
     parts.append("<p class='muted'>基準資料集（Common Voice）只用來確認模型正常，不參與排名。動畫、VTuber 各取前 2 名進入下一階段。</p>")
+    return parts
 
-    # ---------------------------------------------------------- stage 2
-    parts.append("<h2>階段 2｜語音偵測閾值</h2>")
-    if not plan.get("recordings"):
-        parts.append("<p>沒有自己的錄音（bench_clips/live/），已略過。建議使用預設閾值 0.5。</p>")
-    elif not vad_t:
+
+def _stage2_section(store) -> list:
+    vad_t = analysis.vad_table(store)
+    best_th = analysis.best_vad_thresholds(store)
+    parts = ["<h2>階段 2｜語音偵測閾值</h2>"]
+    if not store.plan["recordings"]:
+        parts.append("<p>沒有自己的錄音（bench_clips/live/），已略過。閾值維持你目前的設定（預設 0.5）。</p>")
+        return parts
+    if not vad_t:
         parts.append("<p class='bad'>有自己的錄音，但沒有得到評分結果（辨識或評審失敗，原因見下方「略過或失敗的項目」）。"
-                     "建議先用預設閾值 0.5。</p>")
-    else:
-        rows = []
-        for asr, by_th in vad_t.items():
-            for th, v in sorted(by_th.items()):
-                best = " ★" if best_th.get(asr) == th else ""
-                judged = f"{v['judged_windows']}/{v['windows']}"
-                if v["errors_per_min"] is None:
-                    judged = f"<span class='bad'>評審失敗 {judged}</span>"
-                rows.append([e(asr_label(asr)), num(th) + best, num(v["hallucinated_per_min"]), num(v["missed_per_min"]),
-                             num(v["errors_per_min"]), str(v["segments"]), pct(v["speech_ratio"]), num(v["minutes"], 1),
-                             judged])
-        parts.append(_table(["辨識模型", "閾值", "幻聽/分鐘", "漏句/分鐘", "合計/分鐘", "片段數", "送辨識比例", "錄音分鐘",
-                             "已評/總時段"], rows, num_cols=(2, 3, 4, 5, 6, 7)))
+                     "閾值維持你目前的設定（預設 0.5）。</p>")
+        return parts
+    rows = []
+    for asr, by_th in vad_t.items():
+        for th, v in sorted(by_th.items()):
+            best = " ★" if best_th.get(asr) == th else ""
+            judged = f"{v['judged_windows']}/{v['windows']}"
+            if v["errors_per_min"] is None:
+                judged = f"<span class='bad'>評審失敗 {judged}</span>"
+            rows.append([e(asr_label(asr)), num(th) + best, num(v["hallucinated_per_min"]), num(v["missed_per_min"]),
+                         num(v["errors_per_min"]), str(v["segments"]), pct(v["speech_ratio"]), num(v["minutes"], 1),
+                         judged])
+    parts.append(_table(["辨識模型", "閾值", "幻聽/分鐘", "漏句/分鐘", "合計/分鐘", "片段數", "送辨識比例", "錄音分鐘",
+                         "已評/總時段"], rows, num_cols=(2, 3, 4, 5, 6, 7)))
+    return parts
 
-    # ---------------------------------------------------------- stage 3
-    parts.append("<h2>階段 3｜翻譯</h2>")
+
+def _stage3_section(store, rankings) -> list:
+    plan = store.plan
+    tl_t = analysis.tl_table(store)
+    q_t = analysis.quality_table(store)
+    parts = ["<h2>階段 3｜翻譯</h2>"]
     tl_failed = {m["model"]: m.get("reason") for m in store.read("tl_meta") if m.get("status") == "failed"}
     for cat in analysis.CATEGORIES:
         rows = []
-        for m in plan.get("tl_models", []):
+        for m in plan["tl_models"]:
             q = q_t.get((m["fp"], cat))
             t = tl_t.get((m["fp"], cat))
             if not q and not t:
-                if m["fp"] in tl_failed and cat in plan.get("datasets", []):
+                if m["fp"] in tl_failed and cat in plan["datasets"]:
                     rows.append([e(m["name"]), f"<span class='bad'>失敗：{e(tl_failed[m['fp']])}</span>"]
                                 + ["—"] * 9)
                 continue
@@ -219,43 +266,62 @@ def build(store) -> dict:
             parts.append(_table(["翻譯模型", "品質", *[judge_mod.CRITERIA_LABELS[c] for c in judge_mod.CRITERIA],
                                  "第一個字", "整句完成", "失敗率", "失敗原因", "已評分句數"], rows,
                                 num_cols=(1, 2, 3, 4, 5, 6, 7, 8, 10)))
+    return parts
 
-    # ---------------------------------------------------------- combinations
-    parts.append("<h2>全部組合</h2>")
+
+def _combos_section(combo_t) -> list:
+    parts = ["<h2>全部組合</h2>"]
     for cat, rows_c in combo_t.items():
         rows = []
         for c in rows_c:
-            status = "<span class='ok'>推薦</span>" if c["recommended"] else \
+            verdict = "<span class='ok'>推薦</span>" if c["recommended"] else \
                 "<span class='bad'>不推薦</span><br>" + e("；".join(c["reasons"]))
             if c["warnings"]:
-                status += "<br><span class='warn'>" + e("；".join(c["warnings"])) + "</span>"
-            rows.append([e(asr_label(c["asr"])), num(c["vad_threshold"]), e(c["tl_name"]), num(c["composite"], 1),
+                verdict += "<br><span class='warn'>" + e("；".join(c["warnings"])) + "</span>"
+            vad = num(c["vad_threshold"]) if c["vad_measured"] else "未實測"
+            rows.append([e(asr_label(c["asr"])), vad, e(c["tl_name"]), num(c["composite"], 1),
                          num(c["quality"]), pct(c["cer"]), ms(c["latency_ms"]), ms(c["latency_p90_ms"]),
-                         ms(c["ttft_ms"]), mb(c["vram_peak_mb"]), status])
+                         ms(c["ttft_ms"]), mb(c["vram_peak_mb"]), verdict])
         parts.append(f"<h3>{e(analysis.CATEGORY_LABELS[cat])}</h3>")
         parts.append(_table(["辨識", "VAD", "翻譯", "綜合", "品質", "CER", "總延遲", "P90", "第一個字", "顯示記憶體", "結論"],
                             rows, num_cols=(1, 3, 4, 5, 6, 7, 8, 9)))
     parts.append("<p class='muted'>綜合分數 = 翻譯品質 60% + 辨識準確 20% + 延遲 20%（延遲 0.5 秒以內滿分、3 秒以上 0 分）。"
                  "總延遲超過 2 秒或顯示記憶體超過 11 GB 標為不推薦。</p>")
+    return parts
 
-    # ---------------------------------------------------------- judges and notes
-    if calib:
-        rows = [[e(names.get(j, j)), f"{s['items'] - s['misses']}/{s['items']}",
-                 "<span class='bad'>可能不可靠</span>" if s["misses"] >= 2 else "<span class='ok'>正常</span>"]
-                for j, s in calib.items()]
+
+def _judges_section(store, calib, scale, names) -> list:
+    parts = []
+    judges = list(dict.fromkeys([*calib, *scale]))
+    if judges:
+        rows = []
+        for j in judges:
+            c = calib.get(j)
+            s = scale.get(j) or {}
+            fits = f"{c['items'] - c['misses']}/{c['items']}" if c else "—"
+            verdict = "<span class='bad'>可能不可靠</span>" if c and c["misses"] >= 2 else "<span class='ok'>正常</span>"
+            offset = s.get("offset")
+            shown = "—" if offset is None else f"{offset:+.2f}"
+            if offset is not None and abs(offset) > LARGE_OFFSET:
+                shown = f"<span class='warn'>{shown}</span>"
+            rows.append([e(names.get(j, j)), fits, shown, f"{s.get('clamped', 0)}/{s.get('scored', 0)}", verdict])
         parts.append("<h2>評審校準</h2>")
-        parts.append(_table(["評審", "校準題符合", "結論"], rows))
-        parts.append("<p class='muted'>交叉評審：每個翻譯模型不由自己評分；各評審的尺度用共同評過的題目（校準題、"
-                     "兩位評審都評的模型）對齊。只有一個評審時，評它自己的部分標示「自評」。</p>")
+        parts.append(_table(["評審", "校準題符合", "尺度偏移", "對齊後被夾回 1–10 的分數", "結論"], rows,
+                            num_cols=(2, 3)))
+        parts.append("<p class='muted'>交叉評審：每個翻譯模型不由自己評分；各評審的尺度用至少兩位評審都評過的題目"
+                     "（校準題、多位評審都評的模型）對齊，對齊後超出 1–10 的分數夾回範圍內。"
+                     "只有一個評審時，評它自己的部分標示「自評」。</p>")
     failed = [t for t in store.state.get("tasks", []) if t.get("status") == "failed"]
     if failed:
         parts.append("<h2>略過或失敗的項目</h2>")
         parts.append(_table(["項目", "原因"], [[e(task_label(t["id"], names)), e(t.get("reason") or "—")] for t in failed]))
-    parts.append("<h2>注意事項</h2><ul>" + "".join(f"<li>{e(n)}</li>" for n in NOTES) + "</ul>")
-    parts.append("</main></body></html>")
-    (store.dir / "report.html").write_text("".join(parts), encoding="utf-8")
+    return parts
 
-    with open(store.dir / "results.csv", "w", encoding="utf-8-sig", newline="") as f:
+
+# ---------------------------------------------------------------- files
+
+def _write_csv(path: Path, combo_t):
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["category", "asr", "vad_threshold", "translation_model", "composite", "quality",
                     *judge_mod.CRITERIA, "cer", "latency_mean_ms", "latency_p90_ms", "ttft_ms", "asr_ms",
@@ -263,25 +329,68 @@ def build(store) -> dict:
         for cat, rows_c in combo_t.items():
             for c in rows_c:
                 crit = c.get("criteria") or {}
-                w.writerow([cat, c["asr"], c["vad_threshold"], c["tl_name"], _r(c["composite"]), _r(c["quality"]),
+                w.writerow([cat, c["asr"], c["vad_threshold"] if c["vad_measured"] else "", c["tl_name"],
+                            _r(c["composite"]), _r(c["quality"]),
                             *[_r(crit.get(k)) for k in judge_mod.CRITERIA], _r(c["cer"], 4), _r(c["latency_ms"], 0),
                             _r(c["latency_p90_ms"], 0), _r(c["ttft_ms"], 0), _r(c["asr_ms"], 0), _r(c["tl_alone_ms"], 0),
                             _r(c["vram_peak_mb"], 0), _r(c["fail_rate"], 3), c["recommended"],
                             "；".join(c["reasons"]), "；".join(c["warnings"])])
 
-    items = []
-    for cat, picks in recs.items():
-        for p in picks:
-            c = p["combo"]
-            items.append({"id": p["id"], "kinds": p["kinds"], "category": cat, "asr": c["asr"],
-                          "asr_label": asr_label(c["asr"]), "vad_threshold": c["vad_threshold"],
-                          "vad_measured": c["vad_measured"], "tl_fp": c["tl"], "tl_name": c["tl_name"],
-                          "tl_model": c["tl_model"], "composite": c["composite"], "quality": c["quality"],
-                          "latency_ms": c["latency_ms"], "recommended": c["recommended"]})
+
+def rec_item(category: str, pick: dict) -> dict:
+    """One entry of recommendations.json (the only place that builds one)."""
+    c = pick["combo"]
+    return {"id": pick["id"], "kinds": pick["kinds"], "category": category, "asr": c["asr"],
+            "asr_label": asr_label(c["asr"]), "vad_threshold": c["vad_threshold"],
+            "vad_measured": c["vad_measured"], "tl_fp": c["tl"], "tl_name": c["tl_name"],
+            "tl_model": c["tl_model"], "composite": c["composite"], "quality": c["quality"],
+            "latency_ms": c["latency_ms"], "recommended": c["recommended"]}
+
+
+def _write_recs(store, recs):
+    items = [rec_item(cat, p) for cat, picks in recs.items() for p in picks]
     (store.dir / "recommendations.json").write_text(json.dumps(
-        {"run": store.dir.name, "status": store.state.get("status"), "items": items}, ensure_ascii=False, indent=1),
-        encoding="utf-8")
-    return recs
+        {"version": RECS_VERSION, "run": store.dir.name, "status": store.state.get("status"), "items": items},
+        ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _valid_rec(item) -> str | None:
+    """Why an item cannot be applied, or None."""
+    if not isinstance(item, dict):
+        return "not an object"
+    for key, kind in REC_FIELDS.items():
+        if not isinstance(item.get(key), kind):
+            return f"field {key!r} missing or of the wrong type"
+    if item["asr"] not in CANDIDATES_BY_ID:
+        return f"unknown ASR {item['asr']!r}"
+    return None
+
+
+def load_recs(run_dir: Path) -> dict:
+    """{"run", "status", "items"} from a run's recommendations.json. Items that cannot be
+    applied (another version's format, unknown ASR) are logged and left out; the first
+    version's file (a bare list) is accepted with status None."""
+    path = Path(run_dir) / "recommendations.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log.warning(f"Unreadable recommendations {path}: {e}")
+        return {"run": Path(run_dir).name, "status": None, "items": []}
+    if isinstance(data, list):
+        data = {"items": data, "status": None}
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        log.warning(f"{path} is not a recommendations file")
+        return {"run": Path(run_dir).name, "status": None, "items": []}
+    if data.get("version", 1) > RECS_VERSION:
+        log.warning(f"{path} was written by a newer version ({data.get('version')})")
+    items = []
+    for item in data["items"]:
+        problem = _valid_rec(item)
+        if problem:
+            log.warning(f"Ignoring a recommendation in {path}: {problem}")
+        else:
+            items.append(item)
+    return {"run": data.get("run", Path(run_dir).name), "status": data.get("status"), "items": items}
 
 
 def task_label(task_id: str, names: dict) -> str:

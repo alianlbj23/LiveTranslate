@@ -5,8 +5,15 @@ bench_results/<YYYYMMDD_HHMMSS>/
   state.json     task list and frozen stage results (atomic writes)
   results/<kind>.jsonl   one record per line, flushed + fsynced; a cut-off last line
                          (crash mid-write) is ignored when reading
+  bench.log      everything the run logged (the console points here on errors)
+  ollama_serve.log, gpu_watchdog.log   only when the benchmark started Ollama itself
   report.html, results.csv, recommendations.json
-bench_results/.running.lock holds the PID of the run in progress."""
+bench_results/.running.lock holds the PID of the run in progress.
+
+Resume rules: a task marked done or failed is not run again, except that failed tasks
+are reset when the user agrees (cli.cmd_resume) and judge tasks always are. Inside a
+task that runs again only the items that are not final (orchestrator._final) are redone."""
+import copy
 import json
 import logging
 import os
@@ -17,6 +24,18 @@ from bench import paths
 
 log = logging.getLogger("LiveTranslate.Bench.State")
 SCHEMA = 1
+RUN_STATUSES = ("running", "done", "interrupted", "error")
+TASK_STATUSES = ("pending", "running", "done", "failed")
+FINISHED = ("done", "failed")
+TASK_FIELDS = ("status", "items_done", "items_total", "attempts", "reason")
+# Values a plan.json may lack (hand-written plans, plans of older versions); readers
+# use plan[key] so a typo fails loudly instead of reading None
+PLAN_DEFAULTS = {
+    "schema": SCHEMA, "quick": False, "stages": [1, 2, 3], "datasets": [], "clip_counts": {}, "data_ids": {},
+    "asr": [], "download_missing": False, "reuse_stage1_from": None, "recordings": [], "tl_models": [],
+    "judges": [], "judge_mode": "single", "together_clips": 20, "restart_ollama": False, "tl_timeout_s": 10.0,
+    "settings_snapshot": {},
+}
 
 
 def atomic_write_json(path: Path, data):
@@ -32,12 +51,18 @@ def atomic_write_json(path: Path, data):
 class RunStore:
     def __init__(self, run_dir: Path):
         self.dir = Path(run_dir)
-        self.plan = json.loads((self.dir / "plan.json").read_text(encoding="utf-8"))
+        loaded = json.loads((self.dir / "plan.json").read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{self.dir / 'plan.json'} is not a plan")
+        self.plan = {**copy.deepcopy(PLAN_DEFAULTS), **loaded}
         state_file = self.dir / "state.json"
         if state_file.exists():
             self.state = json.loads(state_file.read_text(encoding="utf-8"))
         else:
             self.state = {"schema": SCHEMA, "status": "running", "tasks": [], "frozen": {}, "timing": {}}
+        for name, data in (("plan", self.plan), ("state", self.state)):
+            if data.get("schema") != SCHEMA:
+                log.warning(f"{self.dir.name}: {name} schema {data.get('schema')} (this version writes {SCHEMA})")
 
     # -------------------------------------------------------------- creation / lookup
     @classmethod
@@ -63,33 +88,53 @@ class RunStore:
         return sorted(runs, key=lambda d: d.name, reverse=True)
 
     @classmethod
-    def latest_unfinished(cls):
+    def readable_runs(cls):
+        """RunStores newest first; unreadable run folders are logged and skipped."""
         for d in cls.list_runs():
             try:
                 store = cls(d)
             except (OSError, ValueError) as e:
                 log.warning(f"Skipping unreadable run {d}: {e}")
                 continue
-            if store.state.get("status") != "done":
-                return store
-        return None
+            yield store
+
+    @classmethod
+    def latest_unfinished(cls):
+        return next((s for s in cls.readable_runs() if s.state.get("status") != "done"), None)
 
     # -------------------------------------------------------------- state
     def save(self):
         atomic_write_json(self.dir / "state.json", self.state)
 
-    def task(self, task_id: str, **defaults) -> dict:
+    def set_status(self, status: str, error: str | None = None):
+        if status not in RUN_STATUSES:
+            raise ValueError(f"unknown run status {status!r}")
+        self.state["status"] = status
+        if error is None:
+            self.state.pop("error", None)
+        else:
+            self.state["error"] = error[:500]
+        self.save()
+
+    def task(self, task_id: str) -> dict:
+        """The task's entry; a task seen for the first time is added as pending (and saved)."""
         for t in self.state["tasks"]:
             if t["id"] == task_id:
                 return t
-        t = {"id": task_id, "status": "pending", "items_done": 0, "items_total": 0,
-             "attempts": 0, "reason": None, "elapsed_s": 0.0}
-        t.update(defaults)
+        t = {"id": task_id, "status": "pending", "items_done": 0, "items_total": 0, "attempts": 0, "reason": None}
         self.state["tasks"].append(t)
         self.save()
         return t
 
+    def finished(self, task_id: str) -> bool:
+        return self.task(task_id)["status"] in FINISHED
+
     def set_task(self, task_id: str, **fields):
+        unknown = set(fields) - set(TASK_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown task fields {sorted(unknown)}")
+        if "status" in fields and fields["status"] not in TASK_STATUSES:
+            raise ValueError(f"unknown task status {fields['status']!r}")
         t = self.task(task_id)
         t.update(fields)
         self.save()
@@ -107,7 +152,11 @@ class RunStore:
         path = self.dir / "results" / f"{kind}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         # a line cut off by a crash must not swallow the next record
-        broken = path.exists() and path.stat().st_size > 0 and not path.read_bytes().endswith(b"\n")
+        broken = False
+        if path.exists() and path.stat().st_size > 0:
+            with open(path, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                broken = f.read(1) != b"\n"
         with open(path, "a", encoding="utf-8") as f:
             f.write(("\n" if broken else "") + json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
@@ -131,8 +180,31 @@ class RunStore:
                     log.warning(f"Ignoring a corrupt line {i + 1} in {path.name}")
         return out
 
-    def done_keys(self, kind: str, task_id: str) -> set:
-        return {r.get("key") for r in self.read(kind) if r.get("task") == task_id}
+    def final_keys(self, kind: str, task_id: str) -> set:
+        """Items of a task whose latest record needs no retry (is_final)."""
+        latest = {}
+        for r in self.read(kind):
+            if r.get("task") == task_id:
+                latest[r.get("key")] = r
+        return {k for k, r in latest.items() if is_final(kind, r)}
+
+
+def is_final(kind: str, record: dict) -> bool:
+    """A record that needs no retry when its task runs again. Failures under load
+    (together) are measurements themselves: replaying them alone would hide them."""
+    from bench.asr_runner import ASR_EMPTY
+
+    if kind == "asr":
+        return not record.get("error")
+    if kind == "together":
+        return True
+    if kind == "tl":
+        return bool(record.get("ok")) or record.get("error") == ASR_EMPTY
+    if kind == "judge":
+        return record.get("scores") is not None
+    if kind == "vad":
+        return record.get("judged_windows") == record.get("windows")
+    return True
 
 
 # ---------------------------------------------------------------- lock

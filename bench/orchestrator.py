@@ -1,4 +1,4 @@
-"""Runs a benchmark plan stage by stage, resumable at sentence level.
+"""Runs a benchmark plan stage by stage.
 
 Order (fixed so a resume continues where it stopped):
   stage 1  s1/<asr>                each ASR loaded once, all datasets
@@ -9,55 +9,58 @@ Order (fixed so a resume continues where it stopped):
            s3tog/<asr>/<model>     ASR + model loaded together, real-time replay
            s3judge/<judge>         each judge alone: calibration and its assigned
                                    translations (cross judging)
-           s2judge                 stage-2 windows, by the first judge that loads
+           s2judge                 stage-2 windows, by the first judge that loads and
+                                   has not failed its translation scoring
   report
 
-Every item is appended to results/<kind>.jsonl before the next starts; only successful
-items count as done, so a resume retries the failed ones. A model that cannot be
-downloaded, built or loaded is recorded with the reason and skipped; every failure is
-logged to bench.log and shown on the console."""
+Records are appended to results/<kind>.jsonl as they finish: per sentence in stage 1,
+translation alone and judging; per category in the real-time replay; per (ASR,
+recording, threshold) in stage 2 and its judging. A resume skips tasks already done or
+failed (state.py has the rules); inside a task that runs again only items that are not
+final (state.is_final) are redone, so failed sentences of a finished task stay failed.
+A model that cannot be downloaded, built or loaded is recorded with the reason and
+skipped; failures are logged to bench.log and shown on the console."""
 import concurrent.futures
 import ctypes
 import logging
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
-from bench import analysis, asr_runner, datasets, gpu, judge as judge_mod, llm_servers, report, tl_runner, vad_runner
+from bench import analysis, asr_runner, datasets, gpu, judge as judge_mod, llm_servers, paths, report, tl_runner, vad_runner
 from bench.progress import Ewma, ProgressLine, fmt_duration
 from bench.state import RunStore
 
 log = logging.getLogger("LiveTranslate.Bench")
 
-ASR_WARMUP = datasets.WARMUP_CLIPS
 FAIL_STREAK = 10          # this many failures in a row: the model / judge is broken, not slow
 APP_CHECK_EVERY = 10      # items between checks that LiveTranslate was not opened meanwhile
 TL_WORKERS = 8            # like the app's translation executor (Ollama itself runs 2 at a time)
 MAX_WORKER_ERRORS = 3     # ASR errors in a row: the task stops, incomplete and unranked
 TOGETHER_RELEASE_PAD_S = 0.5
-DEFAULT_SECONDS = {  # per item, before any measurement
-    "asr:sensevoice": 0.15, "asr:mlt-nano": 0.6, "asr:anime-whisper": 0.5, "asr:whisper-turbo": 0.35,
-    "tl": 0.9, "judge": 2.0, "load": 30.0}
+DEFAULT_SECONDS = {"tl": 0.9, "judge": 2.0, "load": 30.0}  # per item before any measurement; ASRs: AsrCandidate
 
 
 @dataclass
 class Deps:
     """Injectable collaborators (tests pass fakes)."""
-    asr_client_factory: object = None                      # config -> ASRClient-like
-    translator_factory: object = None                      # (entry, settings, config) -> Translator-like
-    judge_factory: object = None                           # entry -> JudgeClient-like
-    ollama_factory: object = None                          # root url -> Ollama-like
-    vram: object = None                                    # VramReader-like
-    app_running: object = None                             # () -> [pid]
-    vad_factory: object = None                             # (threshold, settings) -> VADProcessor-like
-    load_audio: object = None                              # path -> float32 16 kHz
-    sleep: object = time.sleep
-    out: object = None                                     # text stream for the progress line
-    is_cached: object = None                               # cand -> bool
-    download: object = None                                # cand -> None (raises)
+    asr_client_factory: Callable[[dict], Any] | None = None         # config -> ASRClient-like
+    translator_factory: Callable[[dict, dict, dict], Any] | None = None  # (entry, settings, config) -> Translator-like
+    judge_factory: Callable[[dict], Any] | None = None              # entry -> JudgeClient-like
+    ollama_factory: Callable[[str], Any] | None = None              # root url -> Ollama-like
+    vram: Any = None                                                # VramReader-like
+    app_running: Callable[[], list] | None = None                   # () -> [pid]
+    vad_factory: Callable[[float, dict], Any] | None = None         # (threshold, settings) -> VADProcessor-like
+    load_audio: Callable[[Any], Any] | None = None                  # path -> float32 16 kHz
+    sleep: Callable[[float], None] = time.sleep
+    out: Any = None                                                 # text stream for the progress line
+    is_cached: Callable[[Any], bool] | None = None                  # cand -> bool
+    download: Callable[[Any], None] | None = None                   # cand -> None (raises)
     together_realtime: bool = True
-    extra: dict = field(default_factory=dict)
+    manage_ollama: bool = True                                      # start / restart Ollama processes
 
 
 def _prevent_sleep(on: bool) -> bool:
@@ -74,20 +77,6 @@ def _prevent_sleep(on: bool) -> bool:
     return ok
 
 
-def _final(kind: str, record: dict) -> bool:
-    """A record that needs no retry when its task runs again. Failures under load
-    (together) are measurements themselves: replaying them alone would hide them."""
-    if kind == "asr":
-        return not record.get("error")
-    if kind == "together":
-        return True
-    if kind == "tl":
-        return bool(record.get("ok")) or record.get("error") == asr_runner.ASR_EMPTY
-    if kind == "judge":
-        return record.get("scores") is not None
-    return True
-
-
 class Bench:
     def __init__(self, store: RunStore, settings: dict, config: dict, deps: Deps | None = None):
         self.store = store
@@ -100,6 +89,7 @@ class Bench:
         self._entries = {llm_servers.fingerprint(m): m for m in settings.get("models", []) if isinstance(m, dict)}
         self._ollama_started_pid = None
         self._ollama_restarted = False
+        self._servers = {}
         self.baseline_mb = None
         self._timing = dict(store.state.get("timing") or {})
         self._eta = (0.0, None)
@@ -108,13 +98,6 @@ class Bench:
     def _say(self, message: str, level=logging.INFO):
         log.log(level, message)
         self.progress.finish(message)
-
-    def _done(self, kind: str, task_id: str) -> set:
-        latest = {}
-        for r in self.store.read(kind):
-            if r.get("task") == task_id:
-                latest[r.get("key")] = r
-        return {k for k, r in latest.items() if _final(kind, r)}
 
     def _check_app(self):
         """Pause while the user's LiveTranslate runs (GPU and Ollama would be shared)."""
@@ -155,28 +138,33 @@ class Bench:
         if count % APP_CHECK_EVERY == 0:
             self._check_app()
 
+    def _ollama_at(self, root: str):
+        """One client per server for the whole run (each holds an HTTP connection pool)."""
+        if root not in self._servers:
+            self._servers[root] = (self.d.ollama_factory or llm_servers.Ollama)(root)
+        return self._servers[root]
+
     def _ollama(self, entry):
         import local_models
 
-        root = local_models.ollama_root(entry["api_base"])
-        return (self.d.ollama_factory or llm_servers.Ollama)(root)
+        return self._ollama_at(local_models.ollama_root(entry["api_base"]))
 
     def _unload_llms(self) -> bool:
         """Unload every local model (Ollama: all, LM Studio: lms unload --all). Failures
         are logged; the next measurement waits for VRAM anyway."""
         import local_models
 
-        ok = True
         roots = set()
+        kinds = set()
         for entry in self._entries.values():
             kind = llm_servers.model_kind(entry)
+            kinds.add(kind)
             if kind == "ollama":
                 roots.add(local_models.ollama_root(entry["api_base"]))
-            elif kind == "lmstudio" and not llm_servers.lmstudio_unload_all():
-                log.info("LM Studio has no CLI (lms); waiting for VRAM instead of unloading")
+        ok = "lmstudio" not in kinds or llm_servers.lmstudio_unload_all()
         for root in roots:
             try:
-                server = (self.d.ollama_factory or llm_servers.Ollama)(root)
+                server = self._ollama_at(root)
                 if server.alive() and not server.unload_all(sleep=self.d.sleep):
                     ok = False
             except Exception as e:  # httpx / JSON errors from a busy server: log and go on
@@ -184,15 +172,20 @@ class Bench:
                 log.warning(f"Could not unload the models of {root}: {e}")
         return ok
 
+    def _clear_gpu(self, label: str):
+        """Unload every local LLM and wait for VRAM to fall back."""
+        self._unload_llms()
+        return self._settle(label)
+
     def _ensure_ollama(self, entry) -> bool:
         """Ollama answering with the launcher's fast settings. A tray-started Ollama
         (no fast settings) is restarted when the user agreed before the run."""
         server = self._ollama(entry)
         alive = server.alive()
-        restart = alive and self.store.plan.get("restart_ollama") and not self._ollama_restarted
+        restart = alive and self.store.plan["restart_ollama"] and not self._ollama_restarted
         if alive and not restart:
             return True
-        if self.d.ollama_factory is not None:  # tests: no real process
+        if not self.d.manage_ollama:
             return alive
         from urllib.parse import urlsplit
 
@@ -234,13 +227,15 @@ class Bench:
             elif self.baseline_mb > 1536:
                 self.progress.finish(f"注意：開始前顯示卡已經用了 {self.baseline_mb / 1024:.1f} GB，"
                                      "其他程式（瀏覽器、動態桌布）會影響顯示記憶體的量測。")
-            stages = self.store.plan.get("stages", [1, 2, 3])
-            if self.store.plan.get("reuse_stage1_from"):
+            self._check_clips()
+            plan = self.store.plan
+            stages = plan["stages"]
+            if plan["reuse_stage1_from"]:
                 self._import_stage1()
             elif 1 in stages:
                 self.stage1()
             self._freeze_rankings()
-            recordings = self.store.plan.get("recordings")
+            recordings = plan["recordings"]
             if 2 in stages and recordings:
                 self.stage2_asr()
             if 3 in stages:
@@ -248,20 +243,16 @@ class Bench:
                 self.stage3_together()
             if 3 in stages or (2 in stages and recordings):
                 self.stage_judges()
-            self.store.state["status"] = "done"
-            self.store.save()
+            self.store.set_status("done")
             report.build(self.store)
             self.progress.finish("評測完成。")
         except KeyboardInterrupt:
-            self.store.state["status"] = "interrupted"
-            self.store.save()
+            self.store.set_status("interrupted")
             self.progress.finish("已中斷。之後在選單選「3) 從上次中斷的地方繼續」。")
             raise
         except Exception as e:
             log.exception("Benchmark stopped by an error")
-            self.store.state["status"] = "error"
-            self.store.state["error"] = f"{type(e).__name__}: {e}"[:500]
-            self.store.save()
+            self.store.set_status("error", f"{type(e).__name__}: {e}")
             raise
         finally:
             self._cleanup()
@@ -283,6 +274,18 @@ class Bench:
         except OSError as e:
             log.error(f"Could not save the run state: {e}")
 
+    def _check_clips(self):
+        """Stop before measuring when test clips of the plan are gone: with one missing
+        every ASR would be unranked ("199/200"), with an unreadable manifest every task
+        would finish with 0 sentences."""
+        for ds in self.store.plan["datasets"]:
+            want = self.store.plan["clip_counts"].get(ds, 0)
+            have = len(self._clips(ds)[1])
+            if have < want:
+                raise RuntimeError(f"「{datasets.DATASETS[ds]['label']}」只找到 {have}/{want} 句測試資料"
+                                   "（音檔被刪掉或 manifest.json 讀不到，缺哪些檔見 bench.log）。"
+                                   "請先在選單選 1 補下載，再開始新的評測")
+
     # ------------------------------------------------------------------ stage 1
     def _import_stage1(self):
         if self.store.read("asr"):
@@ -300,7 +303,7 @@ class Bench:
         self.store.freeze("rankings", rankings)
         self.store.freeze("top2", {cat: ids[:2] for cat, ids in rankings.items()})
         for cat in analysis.CATEGORIES:
-            if cat in self.store.plan.get("datasets", []) and not rankings.get(cat):
+            if cat in self.store.plan["datasets"] and not rankings.get(cat):
                 self._say(f"沒有任何辨識模型完成「{analysis.CATEGORY_LABELS[cat]}」的測試，"
                           "這一類不會有翻譯結果和推薦（原因見上面的訊息與 bench.log）。", logging.ERROR)
 
@@ -308,25 +311,31 @@ class Bench:
         for asr_id in self.store.plan["asr"]:
             cand = asr_runner.CANDIDATES_BY_ID[asr_id]
             task_id = f"s1/{asr_id}"
-            if self.store.task(task_id)["status"] in ("done", "failed"):
+            if self.store.finished(task_id):
                 continue
             self._check_app()
             self._run_asr_task(cand, task_id)
 
     def _clips(self, dataset):
-        return datasets.load_clips(dataset, limit=self.store.plan.get("clip_counts", {}).get(dataset))
+        return datasets.load_clips(dataset, limit=self.store.plan["clip_counts"].get(dataset))
 
     def _ensure_asr_model(self, cand, task_id) -> bool:
         hub = self.settings.get("hub", "ms")
-        cached = (self.d.is_cached or (lambda c: asr_runner.is_cached(c, hub)))(cand)
+        if self.d.is_cached is not None:
+            cached = self.d.is_cached(cand)
+        else:
+            cached = asr_runner.is_cached(cand, hub)
         if cached:
             return True
-        if not self.store.plan.get("download_missing"):
+        if not self.store.plan["download_missing"]:
             self._asr_failed(cand, task_id, "模型尚未下載（開始前選擇不下載）")
             return False
         self.progress.finish(f"下載 {cand.label}…")
         try:
-            (self.d.download or (lambda c: asr_runner.download(c, hub, self.settings.get("download_proxy", "system"))))(cand)
+            if self.d.download is not None:
+                self.d.download(cand)
+            else:
+                asr_runner.download(cand, hub, self.settings.get("download_proxy", "system"))
             return True
         except Exception as e:  # any download error: record and skip this model
             self._asr_failed(cand, task_id, f"下載失敗：{e}")
@@ -365,8 +374,9 @@ class Bench:
             return
         self._settle("start")
         hint_missing = asr_runner.hint_missing_for(cand, self.forced)
-        done = self._done("asr", task_id)
-        total = sum(len(self._clips(ds)[1]) for ds in plan["datasets"])
+        done = self.store.final_keys("asr", task_id)
+        clips = [(ds, clip) for ds in plan["datasets"] for clip in self._clips(ds)[1]]
+        total = len(clips)
         self.store.set_task(task_id, status="running", items_total=total,
                             attempts=self.store.task(task_id)["attempts"] + 1)
         ewma = Ewma()
@@ -378,53 +388,50 @@ class Bench:
                 if session is None:
                     return
                 warm, _ = self._clips(plan["datasets"][0])
-                for clip in warm[:ASR_WARMUP]:
+                for clip in warm[:datasets.WARMUP_CLIPS]:
                     session.transcribe(self._audio(clip.wav))
                 count = len(done)
-                for ds in plan["datasets"]:
-                    for clip in self._clips(ds)[1]:
-                        key = f"{ds}/{clip.id}"
-                        if key in done:
-                            continue
-                        base = {"task": task_id, "key": key, "asr": cand.id, "dataset": ds, "clip": clip.id,
-                                "ref": clip.ref, "duration": clip.duration}
-                        try:
-                            audio = self._audio(clip.wav)
-                        except Exception as e:  # unreadable clip: a data problem, not the ASR's
-                            log.warning(f"Cannot read {clip.wav}: {e}")
-                            self.store.append("asr", {**base, "raw": "", "display": "", "error": f"audio: {e}",
-                                                      "skip": True, "ms": None})
-                            continue
-                        try:
-                            result, ms = session.transcribe(audio)
-                        except Exception as e:  # this sentence failed: it counts as all wrong
-                            errors += 1
-                            streak += 1
-                            alive = isinstance(e, ASRWorkerError) and e.recoverable
-                            log.error(f"{cand.label} {'failed' if alive else 'worker died'} on {key}: {e}")
-                            self.store.append("asr", {**base, "raw": "", "display": "",
-                                                      "error": (str(e) if alive else f"worker: {e}")[:200],
-                                                      "ms": None})
-                            if streak >= MAX_WORKER_ERRORS:
-                                raise
-                            if not alive:  # start a fresh worker for the next sentence
-                                session.close()
-                                session = self._open_session(cand, task_id)
-                                if session is None:
-                                    return
-                            continue
-                        streak = 0
-                        raw = (result or {}).get("text", "") if result else ""
-                        label = (result or {}).get("language", "") if result else ""
-                        shown, reason = asr_runner.displayed_text(raw, label, clip.duration, self.forced, hint_missing)
-                        self.store.append("asr", {**base, "raw": raw, "label": label, "display": shown,
-                                                  "reason": reason, "ms": ms})
-                        count += 1
-                        self._maybe_check_app(count)
-                        avg = ewma.add(ms)
-                        self._record_timing(f"asr:{cand.id}", avg / 1000)
-                        self.progress.show(f"階段 1/3 辨識｜{cand.label}", ds, count, total, avg,
-                                           self._remaining_estimate())
+                for ds, clip in clips:
+                    key = f"{ds}/{clip.id}"
+                    if key in done:
+                        continue
+                    base = {"task": task_id, "key": key, "asr": cand.id, "dataset": ds, "clip": clip.id,
+                            "ref": clip.ref, "duration": clip.duration}
+                    try:
+                        audio = self._audio(clip.wav)
+                    except Exception as e:  # unreadable clip: a data problem, not the ASR's
+                        log.warning(f"Cannot read {clip.wav}: {e}")
+                        self.store.append("asr", {**base, "raw": "", "display": "", "error": f"audio: {e}",
+                                                  "skip": True, "ms": None})
+                        continue
+                    try:
+                        result, ms = session.transcribe(audio)
+                    except Exception as e:  # this sentence failed: it counts as all wrong
+                        errors += 1
+                        streak += 1
+                        alive = isinstance(e, ASRWorkerError) and e.recoverable
+                        log.error(f"{cand.label} {'failed' if alive else 'worker died'} on {key}: {e}")
+                        self.store.append("asr", {**base, "raw": "", "display": "",
+                                                  "error": (str(e) if alive else f"worker: {e}")[:200], "ms": None})
+                        if streak >= MAX_WORKER_ERRORS:
+                            raise
+                        if not alive:  # start a fresh worker for the next sentence
+                            session.close()
+                            session = self._open_session(cand, task_id)
+                            if session is None:
+                                return
+                        continue
+                    streak = 0
+                    raw, label = asr_runner.result_text(result)
+                    shown, reason = asr_runner.displayed_text(raw, label, clip.duration, self.forced, hint_missing)
+                    self.store.append("asr", {**base, "raw": raw, "label": label, "display": shown,
+                                              "reason": reason, "ms": ms})
+                    count += 1
+                    self._maybe_check_app(count)
+                    avg = ewma.add(ms)
+                    self._record_timing(f"asr:{cand.id}", avg / 1000)
+                    self.progress.show(f"階段 1/3 辨識｜{cand.label}", ds, count, total, avg,
+                                       self._remaining_estimate())
             except Exception as e:  # incomplete: keep what was measured, do not rank it
                 log.exception(f"{cand.label} stopped")
                 self.store.append("asr_meta", {"task": task_id, "asr": cand.id, "status": "incomplete",
@@ -443,8 +450,11 @@ class Bench:
         self._settle(cand.label)
 
     # ------------------------------------------------------------------ stage 2
+    def _top2(self) -> dict:
+        return self.store.frozen("top2") or {}
+
     def _top2_union(self, categories=None):
-        top2 = self.store.frozen("top2", {}) or {}
+        top2 = self._top2()
         out = []
         for cat in (categories or analysis.CATEGORIES):
             for a in top2.get(cat, []):
@@ -453,19 +463,20 @@ class Bench:
         return out
 
     def stage2_asr(self):
-        recordings = self.store.plan.get("recordings", [])
-        cats = sorted({r["category"] for r in recordings})
-        if not self._top2_union(cats):
+        recordings = self.store.plan["recordings"]
+        asr_ids = self._top2_union(sorted({r["category"] for r in recordings}))
+        if not asr_ids:
             self._say("沒有可用的辨識模型，第 2 階段（語音偵測閾值）略過。", logging.ERROR)
             return
-        for asr_id in self._top2_union(cats):
+        top2 = self._top2()
+        for asr_id in asr_ids:
             cand = asr_runner.CANDIDATES_BY_ID[asr_id]
             task_id = f"s2asr/{asr_id}"
-            if self.store.task(task_id)["status"] in ("done", "failed"):
+            if self.store.finished(task_id):
                 continue
             self._check_app()
             self._settle("stage 2")
-            done = self._done("vad_raw", task_id)
+            done = self.store.final_keys("vad_raw", task_id)
             hint_missing = asr_runner.hint_missing_for(cand, self.forced)
             session = self._open_session(cand, task_id)
             if session is None:
@@ -473,7 +484,7 @@ class Bench:
             failures = []
             try:
                 for rec_no, rec in enumerate(recordings, 1):
-                    if asr_id not in (self.store.frozen("top2", {}) or {}).get(rec["category"], []):
+                    if asr_id not in top2.get(rec["category"], []):
                         continue
                     try:
                         if session.client is None:  # the worker died on an earlier recording
@@ -493,16 +504,16 @@ class Bench:
     def _stage2_recording(self, session, cand, rec, rec_no, n_recs, task_id, done, hint_missing):
         audio = self._audio(rec["path"])
         minutes = len(audio) / vad_runner.SR / 60
+        base = {"task": task_id, "asr": cand.id, "recording": rec["path"], "category": rec["category"],
+                "minutes": minutes}
         key = f"{rec['path']}/continuous"
         if key not in done:
             windows = []
             for s, e in vad_runner.continuous_windows(audio):
                 result, _ms = session.transcribe(audio[s:e])
                 windows.append({"start": s / vad_runner.SR, "end": e / vad_runner.SR,
-                                "text": (result or {}).get("text", "") if result else ""})
-            self.store.append("vad_raw", {"task": task_id, "key": key, "asr": cand.id, "recording": rec["path"],
-                                          "category": rec["category"], "threshold": None, "windows": windows,
-                                          "minutes": minutes})
+                                "text": asr_runner.result_text(result)[0]})
+            self.store.append("vad_raw", {**base, "key": key, "threshold": None, "windows": windows})
         for th in vad_runner.THRESHOLDS:
             key = f"{rec['path']}/{th}"
             if key in done:
@@ -513,21 +524,20 @@ class Bench:
             for seg in vad_runner.segment_recording(audio, vad):
                 speech_s += seg["end"] - seg["start"]
                 result, _ms = session.transcribe(seg["audio"])
-                raw = (result or {}).get("text", "") if result else ""
-                label = (result or {}).get("language", "") if result else ""
+                raw, label = asr_runner.result_text(result)
                 shown, _reason = asr_runner.displayed_text(raw, label, seg["end"] - seg["start"], self.forced, hint_missing)
                 if shown:
                     lines.append({"start": seg["start"], "end": seg["end"], "text": shown})
-            self.store.append("vad_raw", {"task": task_id, "key": key, "asr": cand.id, "recording": rec["path"],
-                                          "category": rec["category"], "threshold": th, "lines": lines,
-                                          "segments": len(lines), "speech_s": speech_s, "minutes": minutes})
+            self.store.append("vad_raw", {**base, "key": key, "threshold": th, "lines": lines,
+                                          "segments": len(lines), "speech_s": speech_s})
             self.progress.show("階段 2/3 語音偵測", f"{cand.label}｜閾值 {th}｜錄音", rec_no, n_recs, None,
                                self._remaining_estimate(), force=True)
 
     # ------------------------------------------------------------------ stage 3
     def _tl_inputs(self):
-        """{category: [(clip, displayed text of the best ASR)]}"""
-        rankings = self.store.frozen("rankings", {}) or {}
+        """{category: [(clip, displayed text of the best ASR)]}. A clip without a record of
+        that ASR (stage 1 reused from a run on other clips) is logged and left out."""
+        rankings = self.store.frozen("rankings") or {}
         records = {}
         for r in self.store.read("asr"):
             if not r.get("skip"):
@@ -537,12 +547,14 @@ class Bench:
             if cat not in self.store.plan["datasets"] or not rankings.get(cat):
                 continue
             best = rankings[cat][0]
-            rows = []
-            for clip in self._clips(cat)[1]:
-                r = records.get((best, cat, clip.id))
-                if r is not None:
-                    rows.append((clip, r.get("display") or ""))
-            out[cat] = rows
+            clips = self._clips(cat)[1]
+            rows = [(clip, records[(best, cat, clip.id)].get("display") or "")
+                    for clip in clips if (best, cat, clip.id) in records]
+            if len(rows) < len(clips):
+                log.warning(f"{cat}: {len(clips) - len(rows)} of {len(clips)} test sentences have no {best} "
+                            "result in stage 1; they are not translated")
+            if rows:
+                out[cat] = rows
         return out
 
     def _translator(self, entry):
@@ -550,28 +562,34 @@ class Bench:
 
     def stage3_translate(self):
         inputs = self._tl_inputs()
+        no_input = None
+        if not inputs:
+            ranked = any((self.store.frozen("rankings") or {}).values())
+            no_input = ("沒有可用的辨識結果（第 1 階段沒有任何辨識模型完成）" if not ranked
+                        else "第 1 階段的辨識結果和目前的測試句子對不上（測試資料重新抽樣過？請勾選階段 1 重跑）")
         for m in self.store.plan["tl_models"]:
             task_id = f"s3tl/{m['fp']}"
-            if self.store.task(task_id)["status"] in ("done", "failed"):
+            if self.store.finished(task_id):
                 continue
             entry = self._entries.get(m["fp"])
             if entry is None:
                 self._tl_failed(m, task_id, "設定檔裡已沒有這個模型")
                 continue
-            if not inputs:
-                self._tl_failed(m, task_id, "沒有可用的辨識結果（第 1 階段沒有任何辨識模型完成）")
+            if no_input:
+                self._tl_failed(m, task_id, no_input)
                 continue
             self._check_app()
-            self._unload_llms()
-            settle = self._settle(m["name"])
+            settle = self._clear_gpu(m["name"])
             self._translate_task(m, entry, inputs, task_id, settle)
-        self._unload_llms()
-        self._settle("stage 3 translation")
+        self._clear_gpu("stage 3 translation")
 
     def _translate_task(self, m, entry, inputs, task_id, settle):
-        done = self._done("tl", task_id)
+        done = self.store.final_keys("tl", task_id)
+        todo = [(cat, clip, source) for cat, rows in inputs.items() for clip, source in rows
+                if f"{cat}/{clip.id}" not in done]
         total = sum(len(v) for v in inputs.values())
         errors = {}
+        broken = None
         with gpu.VramSampler(self.vram) as sampler:
             try:
                 load_s = self._load_llm(entry)
@@ -585,53 +603,47 @@ class Bench:
             count = len(done)
             streak = 0
             ewma = Ewma()
-            broken = None
-            for cat, rows in inputs.items():
-                for clip, source in rows:
-                    key = f"{cat}/{clip.id}"
-                    if key in done:
-                        continue
-                    if not source:
-                        rec = {"ok": False, "text": "", "ttft_ms": None, "total_ms": None, "error": asr_runner.ASR_EMPTY}
+            for cat, clip, source in todo:
+                key = f"{cat}/{clip.id}"
+                if not source:
+                    rec = {"ok": False, "text": "", "ttft_ms": None, "total_ms": None, "error": asr_runner.ASR_EMPTY}
+                else:
+                    rec = tl_runner.translate_timed(translator, source)
+                    if rec["ok"]:
+                        streak = 0
+                        self._record_timing("tl", ewma.add(rec["total_ms"]) / 1000)
                     else:
-                        rec = tl_runner.translate_timed(translator, source)
-                        if rec["ok"]:
-                            streak = 0
-                            self._record_timing("tl", ewma.add(rec["total_ms"]) / 1000)
-                        else:
-                            streak += 1
-                            errors[rec["error"]] = errors.get(rec["error"], 0) + 1
-                            log.warning(f"{m['name']} failed on {key}: {rec['error']} {rec.get('detail', '')}")
-                    self.store.append("tl", {"task": task_id, "key": key, "model": m["fp"], "category": cat,
-                                             "clip": clip.id, "ref": clip.ref, "source": source, **rec})
-                    count += 1
-                    self._maybe_check_app(count)
-                    self.progress.show(f"階段 3/3 翻譯｜{m['name']}", cat, count, total, ewma.value,
-                                       self._remaining_estimate())
-                    if streak >= FAIL_STREAK:
-                        broken = rec.get("error")
-                        break
-                if broken:
+                        streak += 1
+                        errors[rec["error"]] = errors.get(rec["error"], 0) + 1
+                        log.warning(f"{m['name']} failed on {key}: {rec['error']} {rec.get('detail', '')}")
+                self.store.append("tl", {"task": task_id, "key": key, "model": m["fp"], "category": cat,
+                                         "clip": clip.id, "ref": clip.ref, "source": source, **rec})
+                count += 1
+                self._maybe_check_app(count)
+                self.progress.show(f"階段 3/3 翻譯｜{m['name']}", cat, count, total, ewma.value,
+                                   self._remaining_estimate())
+                if streak >= FAIL_STREAK:
+                    broken = f"連續 {FAIL_STREAK} 句失敗（{rec['error']} {rec.get('detail') or ''}".strip() + "）"
                     break
         meta = {"task": task_id, "model": m["fp"], "load_s": load_s, "vram_peak_mb": sampler.peak_mb,
                 "errors": errors, "vram_settle": settle.get("status")}
         if broken:
-            self.store.append("tl_meta", {**meta, "status": "failed", "reason": f"連續 {FAIL_STREAK} 句失敗（{broken}）"})
-            self._fail_task(task_id, f"連續 {FAIL_STREAK} 句失敗（{broken}）", m["name"])
+            self.store.append("tl_meta", {**meta, "status": "failed", "reason": broken})
+            self._fail_task(task_id, broken, m["name"])
             return
         self.store.append("tl_meta", {**meta, "status": "ok"})
         self.store.set_task(task_id, status="done", items_done=total)
         summary = "、".join(f"{k} {v} 句" for k, v in errors.items())
         self._say(f"{m['name']} 翻譯完成" + (f"（失敗：{summary}）" if summary else ""))
 
-    def _tl_failed(self, m, task_id, reason, peak=None):
+    def _tl_failed(self, m, task_id, reason):
         self.store.append("tl_meta", {"task": task_id, "model": m["fp"], "status": "failed", "reason": reason,
-                                      "vram_peak_mb": peak})
+                                      "vram_peak_mb": None})
         self._fail_task(task_id, reason, m["name"])
 
     def stage3_together(self):
-        top2 = self.store.frozen("top2", {}) or {}
-        n_clips = self.store.plan.get("together_clips", 20)
+        top2 = self._top2()
+        n_clips = self.store.plan["together_clips"]
         failed_models = {t["id"].split("/", 1)[1] for t in self.store.state["tasks"]
                          if t["id"].startswith("s3tl/") and t["status"] == "failed"}
         for asr_id in self._top2_union():
@@ -640,7 +652,7 @@ class Bench:
             for m in self.store.plan["tl_models"]:
                 entry = self._entries.get(m["fp"])
                 task_id = f"s3tog/{asr_id}/{m['fp']}"
-                if self.store.task(task_id)["status"] in ("done", "failed"):
+                if self.store.finished(task_id):
                     continue
                 if entry is None or m["fp"] in failed_models:
                     self.store.append("together_meta", {"task": task_id, "asr": asr_id, "model": m["fp"],
@@ -648,15 +660,13 @@ class Bench:
                     self.store.set_task(task_id, status="failed", reason="翻譯模型無法使用")
                     continue
                 self._check_app()
-                self._unload_llms()
-                self._settle(f"{cand.label} + {m['name']}")
+                self._clear_gpu(f"{cand.label} + {m['name']}")
                 self._run_together(cand, m, entry, cats, n_clips, task_id)
-        self._unload_llms()
-        self._settle("stage 3 together")
+        self._clear_gpu("stage 3 together")
 
     def _run_together(self, cand, m, entry, cats, n_clips, task_id):
         label = f"{cand.label} + {m['name']}"
-        done = self._done("together", task_id)
+        done = self.store.final_keys("together", task_id)
         # a category is replayed as a whole (its records are written together at its end)
         todo = {cat: [c for c in self._clips(cat)[1][:n_clips] if f"{cat}/{c.id}" not in done] for cat in cats}
         todo = {cat: clips for cat, clips in todo.items() if clips}
@@ -705,9 +715,9 @@ class Bench:
         asr_runner.warm_up_filters(self.forced)
         warm, _ = self._clips(cats[0]) if cats else ([], [])
         results = []
-        for clip in warm[:ASR_WARMUP]:
+        for clip in warm[:datasets.WARMUP_CLIPS]:
             result, _ms = session.transcribe(self._audio(clip.wav))
-            results.append(tl_runner.translate_timed(translator, (result or {}).get("text") or "テスト"))
+            results.append(tl_runner.translate_timed(translator, asr_runner.result_text(result)[0] or "テスト"))
         if results and not any(r["ok"] for r in results):
             last = results[-1]
             raise RuntimeError(f"暖機翻譯全部失敗：{last['error']} {last.get('detail') or ''}".strip())
@@ -733,14 +743,15 @@ class Bench:
         try:
             for i, clip in enumerate(clips):
                 if self.d.together_realtime:
-                    wait = t0 + release[i] - time.perf_counter()
+                    released = t0 + release[i]
+                    wait = released - time.perf_counter()
                     if wait > 0:
                         self.d.sleep(wait)
-                released = t0 + release[i] if self.d.together_realtime else time.perf_counter()
+                else:
+                    released = time.perf_counter()
                 start = time.perf_counter()
                 result, asr_ms = session.transcribe(self._audio(clip.wav))
-                raw = (result or {}).get("text", "") if result else ""
-                label = (result or {}).get("language", "") if result else ""
+                raw, label = asr_runner.result_text(result)
                 shown, _reason = asr_runner.displayed_text(raw, label, clip.duration, self.forced, hint_missing)
                 base = {"clip": clip.id, "queue_ms": max(0.0, (start - released) * 1000), "asr_ms": asr_ms,
                         "source": shown}
@@ -764,23 +775,21 @@ class Bench:
     # ------------------------------------------------------------------ judges
     def stage_judges(self):
         plan = self.store.plan
-        judges = plan.get("judges") or []
+        judges = plan["judges"]
         candidates = [m["fp"] for m in plan["tl_models"]]
         assignment = judge_mod.assign_judges(candidates, judges)
-        vad_pending = bool(plan.get("recordings")) and 2 in plan.get("stages", []) \
-            and self.store.task("s2judge")["status"] not in ("done", "failed")
+        vad_pending = bool(plan["recordings"]) and 2 in plan["stages"] and not self.store.finished("s2judge")
         for jfp in judges:
             entry = self._entries.get(jfp)
             task_id = f"s3judge/{jfp}"
-            status = self.store.task(task_id)["status"]
-            if status in ("done", "failed") and not vad_pending:
+            scored = self.store.finished(task_id)
+            if scored and not vad_pending:
                 continue
             if entry is None:
                 self._fail_task(task_id, "設定檔裡已沒有這個評審模型")
                 continue
             self._check_app()
-            self._unload_llms()
-            self._settle(f"judge {entry.get('name')}")
+            self._clear_gpu(f"judge {entry.get('name')}")
             try:
                 self._load_llm(entry)
                 client = (self.d.judge_factory or judge_mod.JudgeClient)(entry)
@@ -788,27 +797,26 @@ class Bench:
                 log.exception(f"Judge {entry.get('name')} could not start")
                 self._fail_task(task_id, f"無法開始：{e}", f"評審 {entry.get('name')}")
                 continue
-            if status not in ("done", "failed"):
+            if not scored:
                 self._judge_translations(client, entry, jfp, assignment, task_id)
             if vad_pending and self.store.task(task_id)["status"] != "failed":
                 vad_pending = not self._judge_vad(client, entry)  # stopped: the next judge takes over
         if vad_pending and self.store.task("s2judge")["status"] != "failed":
             self._fail_task("s2judge", "沒有可用的評審，第 2 階段的結果沒有評分", "語音偵測評分")
-        self._unload_llms()
-        self._settle("judges")
+        self._clear_gpu("judges")
 
     def _judge_translations(self, client, entry, jfp, assignment, task_id):
         tl_records = {}
         for r in self.store.read("tl"):
             tl_records[(r["model"], r["category"], r["clip"])] = r
-        done = self._done("judge", task_id)
-        items = [(f"cal/{cid}", "anime", ja, tl, None, False) for cid, ja, tl, _exp in judge_mod.CALIBRATION]
+        done = self.store.final_keys("judge", task_id)
+        items = [(judge_mod.cal_key(cid), "anime", ja, tl, None, False) for cid, ja, tl, _exp in judge_mod.CALIBRATION]
         for r in tl_records.values():
             if not (r.get("ok") and r.get("source")):
                 continue
             for j, is_self in assignment.get(r["model"], []):
                 if j == jfp:
-                    items.append((f"{r['model']}/{r['category']}/{r['clip']}", r["category"], r["ref"],
+                    items.append((judge_mod.item_key(r["model"], r["category"], r["clip"]), r["category"], r["ref"],
                                   r["text"], r["model"], is_self))
         total = len(items)
         count = len(done)
@@ -828,7 +836,7 @@ class Bench:
                                (ewma.value or 0) * 1000, self._remaining_estimate())
             if scores is None:
                 streak += 1
-                cal_fail += item.startswith("cal/")
+                cal_fail += item.startswith(judge_mod.CAL_PREFIX)
             else:
                 streak = 0
             why = None
@@ -900,44 +908,52 @@ def _warmup_sentences():
 # ---------------------------------------------------------------------- estimates
 
 def estimate_remaining(store, timing: dict | None = None) -> float:
-    """Seconds left for the unfinished part of a plan (stage 3 counts assume 2 ASRs per
-    category until stage 1 has frozen the rankings)."""
+    """Seconds left for the unfinished part of a plan. Until stage 1 has frozen the
+    rankings, later stages assume 2 ASRs per category and at most 3 in total."""
+    from bench.state import FINISHED
+
     timing = timing or {}
     plan = store.plan
-    done_tasks = {t["id"] for t in store.state.get("tasks", []) if t["status"] in ("done", "failed")}
+    done_tasks = {t["id"] for t in store.state.get("tasks", []) if t["status"] in FINISHED}
 
     def per(key):
-        return timing.get(key) or DEFAULT_SECONDS.get(key, DEFAULT_SECONDS["tl"])
+        if timing.get(key):
+            return timing[key]
+        if key.startswith("asr:"):
+            cand = asr_runner.CANDIDATES_BY_ID.get(key[4:])
+            return cand.default_item_s if cand else DEFAULT_SECONDS["tl"]
+        return DEFAULT_SECONDS[key]
 
-    counts = plan.get("clip_counts", {})
+    counts = plan["clip_counts"]
     total = 0.0
-    stages = plan.get("stages", [1, 2, 3])
-    if 1 in stages and not plan.get("reuse_stage1_from"):
-        n = sum(counts.get(ds, 0) for ds in plan.get("datasets", []))
-        for asr in plan.get("asr", []):
+    stages = plan["stages"]
+    if 1 in stages and not plan["reuse_stage1_from"]:
+        n = sum(counts.get(ds, 0) for ds in plan["datasets"])
+        for asr in plan["asr"]:
             if f"s1/{asr}" not in done_tasks:
-                done = len(store.done_keys("asr", f"s1/{asr}"))
+                done = len(store.final_keys("asr", f"s1/{asr}"))
                 total += DEFAULT_SECONDS["load"] + max(0, n - done) * per(f"asr:{asr}")
-    cats = [c for c in analysis.CATEGORIES if c in plan.get("datasets", [])]
+    cats = [c for c in analysis.CATEGORIES if c in plan["datasets"]]
     top2 = (store.state.get("frozen") or {}).get("top2")
     asr_union = len({a for c in cats for a in (top2 or {}).get(c, [])}) if top2 else min(3, 2 * len(cats))
-    models = plan.get("tl_models", [])
-    if 2 in stages and plan.get("recordings"):
+    models = plan["tl_models"]
+    if 2 in stages and plan["recordings"]:
         minutes = sum(r.get("minutes", 1.0) for r in plan["recordings"])
         total += asr_union * (DEFAULT_SECONDS["load"] + minutes * 60 * 0.5)
-        total += minutes * 2 * len(vad_runner.THRESHOLDS) * per("judge")
+        total += vad_runner.estimate_windows(minutes, asr_union) * per("judge")
     if 3 in stages:
         n_tl = sum(counts.get(c, 0) for c in cats)
         for m in models:
             if f"s3tl/{m['fp']}" not in done_tasks:
                 total += DEFAULT_SECONDS["load"] + n_tl * per("tl")
-        together_s = plan.get("together_clips", 20) * 6.0 + 60.0
+        together_s = plan["together_clips"] * 6.0 + 60.0
         total += asr_union * len(models) * together_s
-        judges = plan.get("judges", [])
-        assignment = judge_mod.assign_judges([m["fp"] for m in models], judges)
+        judges = plan["judges"]
+        candidates = [m["fp"] for m in models]
+        assignment = judge_mod.assign_judges(candidates, judges)
         for j in judges:
             if f"s3judge/{j}" not in done_tasks:
-                assigned = sum(1 for m in models if any(x == j for x, _ in assignment[m["fp"]]))
+                assigned = judge_mod.assigned_count(assignment, candidates, j)
                 total += DEFAULT_SECONDS["load"] + (len(judge_mod.CALIBRATION) + assigned * n_tl) * per("judge")
     return total
 
@@ -948,8 +964,6 @@ def describe_estimate(store) -> str:
 
 def git_rev() -> str:
     try:
-        from bench import paths
-
         out = subprocess.run(["git", "-C", str(paths.ROOT), "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True, timeout=5)
         return out.stdout.strip() or "?"

@@ -220,9 +220,7 @@ def _app(asr_text="", live_text="", seq=5):
     app._tl_backlog_last_warn = 0.0
     app._tl_backlog_callback = None
     app._lang_notice_callback = None
-    app._lang_drop_streak = 0
-    app._asr_hint_missing = False
-    app._asr_lang_support_key = None
+    app._init_language_filter_state()
     app._interim_interval = 0.5
     app._interim_pending = ""
     app._interim_active = False

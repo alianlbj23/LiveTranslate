@@ -75,7 +75,9 @@ def test_run_store_appends_and_survives_a_cut_off_line(bench_dir):
     with open(store.dir / "results" / "asr.jsonl", "a", encoding="utf-8") as f:
         f.write('{"task": "s1/x", "key": "a/')  # crash mid-write
     reopened = state.RunStore(store.dir)
-    assert reopened.done_keys("asr", "s1/x") == {"a/1", "a/2"}
+    assert reopened.final_keys("asr", "s1/x") == {"a/1", "a/2"}
+    reopened.append("asr", {"task": "s1/x", "key": "a/3"})  # the cut-off line does not swallow it
+    assert reopened.final_keys("asr", "s1/x") == {"a/1", "a/2", "a/3"}
 
 
 def test_run_store_tasks_and_frozen_values_persist(bench_dir):

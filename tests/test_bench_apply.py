@@ -104,21 +104,106 @@ def test_setup_steps_use_the_control_panel_labels():
     assert "Anime-Whisper" in settings_io.setup_steps("anime-whisper", 0.5, "X", "V2")[0]
 
 
-def test_apply_menu_flow(user_files):
-    run = state.RunStore.create({"stages": [1]})
-    run.state["status"] = "done"
-    run.save()
+def _pick(asr="sensevoice", model=MODELS[1], threshold=0.4, measured=True, pick_id="A1"):
+    """A recommendation as analysis.recommendations returns it (report.rec_item's input)."""
     from bench.llm_servers import fingerprint
 
-    (run.dir / "recommendations.json").write_text(json.dumps({"run": run.dir.name, "status": "done", "items": [
-        {"id": "A1", "kinds": ["品質最好"], "category": "anime", "asr": "sensevoice", "asr_label": "SenseVoice Small",
-         "vad_threshold": 0.4, "vad_measured": True, "tl_fp": fingerprint(MODELS[1]), "tl_name": "Qwen3.5 4B",
-         "tl_model": "qwen3.5:4b", "composite": 80.0, "quality": 8.0, "latency_ms": 900.0, "recommended": True}]},
+    return {"id": pick_id, "kinds": ["品質最好"], "combo": {
+        "asr": asr, "vad_threshold": threshold, "vad_measured": measured, "tl": fingerprint(model),
+        "tl_name": model["name"], "tl_model": model["model"], "composite": 80.0, "quality": 8.0,
+        "latency_ms": 900.0, "recommended": True}}
+
+
+def _run_with_recs(*picks, status="done", raw_items=None):
+    from bench import report
+
+    run = state.RunStore.create({"stages": [1]})
+    run.set_status(status)
+    items = raw_items if raw_items is not None else [report.rec_item("anime", p) for p in picks]
+    (run.dir / "recommendations.json").write_text(json.dumps(
+        {"version": report.RECS_VERSION, "run": run.dir.name, "status": status, "items": items},
         ensure_ascii=False), encoding="utf-8")
-    answers = iter(["", "", "y"])  # newest run, A1, confirm
+    return run
+
+
+def _apply(*answers):
+    answers = iter(answers)
     out = []
     code = cli.cmd_apply(Console(input_fn=lambda p: next(answers), print_fn=out.append))
+    return code, out
+
+
+def test_apply_menu_flow(user_files):
+    _run_with_recs(_pick())
+    code, out = _apply("", "", "y")  # newest run, A1, confirm
     assert code == 0
     after = json.loads(user_files["settings"].read_text(encoding="utf-8"))
     assert after["asr_engine"] == "funasr" and after["active_model"] == 1
     assert any("已套用" in line for line in out) and any("asr_engine" in line for line in out)
+
+
+def test_unmeasured_vad_threshold_keeps_the_current_one(user_files):
+    """G8: a recommendation without its own recordings must not overwrite the user's
+    threshold with the default."""
+    settings = json.loads(user_files["settings"].read_text(encoding="utf-8"))
+    user_files["settings"].write_text(json.dumps({**settings, "vad_threshold": 0.35}), encoding="utf-8")
+    _run_with_recs(_pick(threshold=0.5, measured=False))
+    code, out = _apply("", "", "y")
+    assert code == 0 and json.loads(user_files["settings"].read_text(encoding="utf-8"))["vad_threshold"] == 0.35
+    assert any("沒有實測" in line for line in out) and any("未實測" in line for line in out)
+
+
+def test_recommendation_that_cannot_be_applied_is_left_out_not_a_traceback(user_files, caplog):
+    """Review finding: an unknown ASR id or a renamed field in recommendations.json ended
+    in a KeyError traceback inside the menu."""
+    from bench import report
+
+    good = report.rec_item("anime", _pick(pick_id="A2"))
+    bad_asr = {**report.rec_item("anime", _pick()), "asr": "whisper-large-v4"}
+    renamed = {k: v for k, v in report.rec_item("anime", _pick(pick_id="A3")).items() if k != "vad_measured"}
+    run = _run_with_recs(raw_items=[bad_asr, renamed, good])
+    with caplog.at_level("WARNING"):
+        assert [r["id"] for r in report.load_recs(run.dir)["items"]] == ["A2"]
+    assert any("whisper-large-v4" in r.message for r in caplog.records)
+    assert any("vad_measured" in r.message for r in caplog.records)
+    code, _out = _apply("", "", "y")
+    assert code == 0 and json.loads(user_files["settings"].read_text(encoding="utf-8"))["asr_engine"] == "funasr"
+
+
+def test_unknown_asr_is_a_settings_error(user_files):
+    with pytest.raises(settings_io.SettingsError, match="不認得"):
+        settings_io.planned_changes(settings_io.load_settings(), "whisper-large-v4", 0.4, MODELS[0])
+    with pytest.raises(settings_io.SettingsError, match="不認得"):
+        settings_io.setup_steps("whisper-large-v4", 0.4, "X", "A1")
+
+
+def test_restoring_twice_still_returns_to_the_settings_before_the_apply(user_files):
+    """Review finding: the first restore backed up the applied settings, and the second
+    "restore the settings from before the last apply" picked that backup instead."""
+    _run_with_recs(_pick())
+    assert _apply("", "", "y")[0] == 0
+    for _ in range(2):
+        code, out = _apply("", "2", "y")  # newest run, R (after A1), confirm
+        assert code == 0 and any("已還原" in line for line in out)
+        assert json.loads(user_files["settings"].read_text(encoding="utf-8")) == user_files["original"]
+    assert len(settings_io.list_backups(include_pre_restore=True)) == 3
+
+
+def test_restore_works_when_the_settings_file_is_broken(user_files):
+    """Review finding: the menu read the settings before offering R, so a broken file
+    made the restore unreachable."""
+    _run_with_recs(_pick())
+    assert _apply("", "", "y")[0] == 0
+    user_files["settings"].write_text("{broken", encoding="utf-8")
+    code, out = _apply("", "2", "y")
+    assert code == 0 and any("已還原" in line for line in out)
+    assert json.loads(user_files["settings"].read_text(encoding="utf-8")) == user_files["original"]
+
+
+def test_broken_config_yaml_is_a_settings_error(tmp_path):
+    bad = tmp_path / "config.yaml"
+    bad.write_text("asr: [unclosed", encoding="utf-8")
+    with pytest.raises(settings_io.SettingsError, match="格式錯誤"):
+        settings_io.load_config(bad)
+    with pytest.raises(settings_io.SettingsError, match="讀不到"):
+        settings_io.load_config(tmp_path / "missing.yaml")

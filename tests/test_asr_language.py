@@ -55,6 +55,21 @@ def test_prompt_language_name(engine_type, code, name):
     assert prompt_language_name(engine_type, code) == name
 
 
+def test_prompt_name_refuses_engines_without_a_language_prompt():
+    """A typo or another engine ("sensevoice") used to get MLT's names silently."""
+    with pytest.raises(ValueError):
+        prompt_language_name("sensevoice", "ja")
+
+
+def test_shared_tables_cannot_be_changed_by_importers():
+    import asr_language
+
+    with pytest.raises(TypeError):
+        asr_language.FUNASR_LANGUAGE_NAMES["xx"] = "x"
+    with pytest.raises(AttributeError):
+        asr_language.SCRIPT_CHECKED_LANGUAGES.add("zh")
+
+
 def test_every_mapped_code_is_an_app_language():
     from i18n import LANGUAGES
 

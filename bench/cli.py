@@ -7,18 +7,17 @@ The user never types these commands: each menu item runs one of them.
   resume    3) continue the last unfinished run
   report    4) open report.html of a run
   apply     5) apply a recommended combination to LiveTranslate (backup first)"""
-import json
 import logging
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from bench import analysis, costs, datasets, judge as judge_mod, llm_servers, paths, settings_io, state
-from bench.asr_runner import ASR_CANDIDATES, CANDIDATES_BY_ID, DOWNLOAD_BYTES, is_cached
+from bench import analysis, costs, datasets, judge as judge_mod, llm_servers, paths, report, settings_io, state, vad_runner
+from bench.asr_runner import ASR_CANDIDATES, CANDIDATES_BY_ID, is_cached
 from bench.orchestrator import Bench, Deps, describe_estimate, estimate_remaining, git_rev
 from bench.progress import fmt_duration
-from bench.wizard import Console
+from bench.wizard import Console, Option
 
 log = logging.getLogger("LiveTranslate.Bench")
 
@@ -60,16 +59,15 @@ def _wait_app_closed(con: Console) -> bool:
 
 def cmd_status(con: Console) -> int:
     parts = []
-    for key in ("anime", "vtuber", "baseline"):
+    for key, label in {**analysis.CATEGORY_LABELS, "baseline": "基準"}.items():
         have, want = datasets.dataset_status(key)
-        label = {"anime": "動畫", "vtuber": "VTuber", "baseline": "基準"}[key]
         parts.append(f"{label} {have}/{want}" + (" ✓" if have >= want else ""))
     live = datasets.live_recordings()
     con.say(" 測試資料：" + "　".join(parts) + f"｜自己的錄音：{len(live)} 檔")
     run = state.RunStore.latest_unfinished()
     if run:
         tasks = run.state.get("tasks", [])
-        finished = sum(1 for t in tasks if t["status"] in ("done", "failed"))
+        finished = sum(1 for t in tasks if t["status"] in state.FINISHED)
         con.say(f" 未完成的評測：{run.dir.name}（已完成 {finished} 個項目，剩餘約 {describe_estimate(run)}）")
     return 0
 
@@ -185,25 +183,23 @@ def manifest_path(manifests: Path, model: str) -> Path:
     return manifests.joinpath(*rel, tag)
 
 
-def _reusable_stage1(chosen: list, counts: dict):
-    """Newest run whose stage 1 finished for every ASR on the same datasets and
-    clip counts, or None."""
+def _reusable_stage1(chosen: list, counts: dict, data_ids: dict, asr_language: str):
+    """Newest run whose stage 1 finished for every ASR on the same clips (sampling
+    method, revision, clip ids) with the same forced language, or None."""
     wanted = {c.id for c in ASR_CANDIDATES}
-    for run_dir in state.RunStore.list_runs():
-        try:
-            run = state.RunStore(run_dir)
-        except (OSError, ValueError) as e:
-            log.warning(f"Skipping unreadable run {run_dir}: {e}")
-            continue
+    for run in state.RunStore.readable_runs():
         status = {t["id"][3:]: t["status"] for t in run.state.get("tasks", []) if t["id"].startswith("s1/")}
-        if not wanted <= {a for a, s in status.items() if s in ("done", "failed")}:
+        if not wanted <= {a for a, s in status.items() if s in state.FINISHED}:
             continue
         if not any(s == "done" for s in status.values()):
             continue
-        same_data = all(d in run.plan.get("datasets", []) and run.plan.get("clip_counts", {}).get(d) == counts[d]
-                        for d in chosen)
+        if (run.plan["settings_snapshot"] or {}).get("asr_language") != asr_language:
+            continue
+        old_ids = run.plan["data_ids"] or {}
+        same_data = all(d in run.plan["datasets"] and run.plan["clip_counts"].get(d) == counts[d]
+                        and data_ids.get(d) is not None and old_ids.get(d) == data_ids[d] for d in chosen)
         if same_data:
-            return run_dir.name
+            return run.dir.name
     return None
 
 
@@ -219,31 +215,17 @@ def build_plan(con: Console, settings: dict, quick: bool = False):
     stages = con.choose_many("要跑哪些階段？", stage_opts, {1, 2, 3})
     if stages is None:
         return None
-
-    ds_opts = []
-    available = {}
-    for key, spec in datasets.DATASETS.items():
-        have = len(datasets.load_clips(key)[1])
-        available[key] = have
-        ds_opts.append((key, spec["label"], have > 0, f"已下載 {have}/{spec['n']}" if have else "尚未下載（先選 1 下載）"))
-    chosen = con.choose_many("要用哪些資料集？", ds_opts, {"anime", "vtuber", "baseline"})
-    if chosen is None:
+    picked = _ask_datasets(con, stages, quick)
+    if picked is None:
         return None
-    if 3 in stages and not ({"anime", "vtuber"} & set(chosen)):
-        con.say("階段 3 需要動畫或 VTuber 資料集至少一個。")
-        return None
-    counts = {}
-    for k in chosen:
-        want = 5 if quick else datasets.DATASETS[k]["n"]
-        counts[k] = min(want, available[k])
-        if counts[k] < want:
-            con.say(f"注意：「{datasets.DATASETS[k]['label']}」只有 {available[k]} 句（目標 {want}），會用這 {available[k]} 句。")
-
+    chosen, counts = picked
+    data_ids = {k: datasets.sample_id(k, counts[k]) for k in chosen}
     reuse = None
     if 1 not in stages:
-        reuse = _reusable_stage1(chosen, counts)
+        reuse = _reusable_stage1(chosen, counts, data_ids, settings.get("asr_language", "auto"))
         if not reuse:
-            con.say("沒有完整的第 1 階段結果可以沿用（要 4 個辨識模型都跑完、資料集和句數相同），必須勾選階段 1。")
+            con.say("沒有完整的第 1 階段結果可以沿用（要 4 個辨識模型都跑完，測試句子和指定的辨識語言都相同），"
+                    "必須勾選階段 1。")
             return None
         con.say(f"沿用 {reuse} 的第 1 階段結果。")
 
@@ -251,48 +233,28 @@ def build_plan(con: Console, settings: dict, quick: bool = False):
     asr_ids = [c.id for c in ASR_CANDIDATES]
     missing = [c for c in ASR_CANDIDATES if not is_cached(c, hub)]
     download_missing = False
-    if missing and (1 in stages and not reuse):
-        size = sum(DOWNLOAD_BYTES[c.id] for c in missing)
+    if missing and 1 in stages:
+        size = sum(c.download_bytes for c in missing)
         con.say("", "這些辨識模型還沒下載：" + "、".join(c.label for c in missing) + f"（約 {size / 1e9:.1f} GB）")
         download_missing = con.confirm("評測時自動下載？（選 n 會略過這些模型）", True)
 
     options = _model_options(settings)
-    tl_opts = [(llm_servers.fingerprint(e), e["name"], usable, note) for e, usable, note in options]
-    tl_pick = con.choose_many("要測哪些翻譯模型？", tl_opts, {o[0] for o in tl_opts if o[2]}) if 3 in stages else []
+    tl_opts = [Option(llm_servers.fingerprint(e), e["name"], usable, note) for e, usable, note in options]
+    tl_pick = con.choose_many("要測哪些翻譯模型？", tl_opts, {o.key for o in tl_opts if o.enabled}) if 3 in stages else []
     if tl_pick is None:
         return None
     judge_pick = []
     if 3 in stages or (2 in stages and recordings):
-        judge_opts = [(llm_servers.fingerprint(e), e["name"], usable and judge_mod.eligible_judge(e),
-                       note if judge_mod.eligible_judge(e) else "只會翻譯，不能當評審")
-                      for e, usable, note in options]
-        if not any(o[2] for o in judge_opts):
-            con.say("沒有可以當評審的模型（Sakura 這類只會翻譯的模型不能評分），翻譯品質無法評分。")
-            return None
-        judge_pick = con.choose_many("交叉評審：要用哪些模型當評審？（至少 2 個才能互評，候選不會評自己）",
-                                     judge_opts, {o[0] for o in judge_opts if o[2]})
+        judge_pick = _ask_judges(con, options)
         if judge_pick is None:
             return None
-        if len(judge_pick) < 2:
-            con.say("只有 1 個評審：評它自己翻譯的部分會標示「自評，分數可能偏高」。")
-
-    restart_ollama = False
-    picked = set(tl_pick) | set(judge_pick)
-    ollama_entries = [e for e, _u, _n in options if llm_servers.fingerprint(e) in picked
-                      and llm_servers.model_kind(e) == "ollama"]
-    if ollama_entries:
-        import local_models
-
-        server = llm_servers.Ollama(local_models.ollama_root(ollama_entries[0]["api_base"]))
-        if server.alive() and llm_servers.pid_file_server() is None:
-            con.say("", "Ollama 已經在執行，但不是啟動器以「快速設定」開的（顯示記憶體用量和速度會和實際使用不同）。")
-            restart_ollama = con.confirm("要以快速設定重新啟動 Ollama 嗎？", True)
+    restart_ollama = _ask_restart_ollama(con, options, set(tl_pick) | set(judge_pick))
 
     entries = {llm_servers.fingerprint(e): e for e, _u, _n in options}
     return {
         "schema": 1, "created": datetime.now().isoformat(timespec="seconds"), "git_rev": git_rev(),
         "seed": datasets.SEED, "quick": quick, "stages": sorted(stages), "datasets": list(chosen),
-        "clip_counts": counts, "asr": asr_ids, "download_missing": download_missing,
+        "clip_counts": counts, "data_ids": data_ids, "asr": asr_ids, "download_missing": download_missing,
         "reuse_stage1_from": reuse,
         "recordings": [{"path": str(p), "category": c, "minutes": _minutes(p)} for p, c in recordings] if 2 in stages else [],
         "tl_models": [{"fp": fp, "name": entries[fp]["name"], "model": entries[fp]["model"],
@@ -304,6 +266,60 @@ def build_plan(con: Console, settings: dict, quick: bool = False):
                                                            "silence_mode", "silence_duration", "min_speech_duration",
                                                            "max_speech_duration", "vad_min_speech_density")},
     }
+
+
+def _ask_datasets(con: Console, stages, quick: bool):
+    """(chosen dataset keys, {key: clip count}), or None when cancelled."""
+    ds_opts = []
+    available = {}
+    for key, spec in datasets.DATASETS.items():
+        have = len(datasets.load_clips(key)[1])
+        available[key] = have
+        ds_opts.append(Option(key, spec["label"], have > 0,
+                              f"已下載 {have}/{spec['n']}" if have else "尚未下載（先選 1 下載）"))
+    chosen = con.choose_many("要用哪些資料集？", ds_opts, {"anime", "vtuber", "baseline"})
+    if chosen is None:
+        return None
+    if 3 in stages and not (set(analysis.CATEGORIES) & set(chosen)):
+        con.say("階段 3 需要動畫或 VTuber 資料集至少一個。")
+        return None
+    counts = {}
+    for k in chosen:
+        want = 5 if quick else datasets.DATASETS[k]["n"]
+        counts[k] = min(want, available[k])
+        if counts[k] < want:
+            con.say(f"注意：「{datasets.DATASETS[k]['label']}」只有 {available[k]} 句（目標 {want}），會用這 {available[k]} 句。")
+    return chosen, counts
+
+
+def _ask_judges(con: Console, options):
+    """Judge fingerprints, or None when cancelled / no model can judge."""
+    judge_opts = [Option(llm_servers.fingerprint(e), e["name"], usable and judge_mod.eligible_judge(e),
+                         note if judge_mod.eligible_judge(e) else "只會翻譯，不能當評審")
+                  for e, usable, note in options]
+    if not any(o.enabled for o in judge_opts):
+        con.say("沒有可以當評審的模型（Sakura 這類只會翻譯的模型不能評分），翻譯品質無法評分。")
+        return None
+    picked = con.choose_many("交叉評審：要用哪些模型當評審？（至少 2 個才能互評，候選不會評自己）",
+                             judge_opts, {o.key for o in judge_opts if o.enabled})
+    if picked is not None and len(picked) < 2:
+        con.say("只有 1 個評審：評它自己翻譯的部分會標示「自評，分數可能偏高」。")
+    return picked
+
+
+def _ask_restart_ollama(con: Console, options, picked: set) -> bool:
+    """A tray-started Ollama has none of the launcher's fast settings: offer a restart."""
+    ollama_entries = [e for e, _u, _n in options if llm_servers.fingerprint(e) in picked
+                      and llm_servers.model_kind(e) == "ollama"]
+    if not ollama_entries:
+        return False
+    import local_models
+
+    server = llm_servers.Ollama(local_models.ollama_root(ollama_entries[0]["api_base"]))
+    if server.alive() and llm_servers.pid_file_server() is None:
+        con.say("", "Ollama 已經在執行，但不是啟動器以「快速設定」開的（顯示記憶體用量和速度會和實際使用不同）。")
+        return con.confirm("要以快速設定重新啟動 Ollama 嗎？", True)
+    return False
 
 
 def _minutes(path) -> float:
@@ -319,9 +335,10 @@ def _minutes(path) -> float:
 def estimate_cost(plan: dict, settings: dict):
     """(US$ total, any cloud model without prices) for translations (alone, warm-up and
     together) and judging (translations, calibration, stage-2 windows)."""
-    entries = {llm_servers.fingerprint(e): e for e in settings_io.translation_models(settings)}
-    n_tl = sum(plan["clip_counts"].get(c, 0) for c in ("anime", "vtuber"))
-    n_together = plan.get("together_clips", 20) * 2 * 2  # up to 2 ASRs x 2 categories
+    entries = settings_io.models_by_fp(settings)
+    cats = [c for c in analysis.CATEGORIES if c in plan["datasets"]]
+    n_tl = sum(plan["clip_counts"].get(c, 0) for c in cats)
+    n_together = plan["together_clips"] * 2 * len(cats)  # 2 ASRs per category
     prompt = settings.get("system_prompt") or ""
     sample = "今日はいい天気ですね、散歩に行こうか。"
     total, unknown = 0.0, False
@@ -330,11 +347,13 @@ def estimate_cost(plan: dict, settings: dict):
         c = costs.call_cost(entries[m["fp"]], tin, tout) if m["fp"] in entries else 0.0
         unknown |= c is None
         total += c or 0.0
-    assignment = judge_mod.assign_judges([m["fp"] for m in plan["tl_models"]], plan["judges"])
-    windows = int(sum(r.get("minutes", 1.0) for r in plan.get("recordings", [])) * 2 * 4 * 2)
+    candidates = [m["fp"] for m in plan["tl_models"]]
+    assignment = judge_mod.assign_judges(candidates, plan["judges"])
+    rec_cats = {r["category"] for r in plan["recordings"]}
+    minutes = sum(r.get("minutes", 1.0) for r in plan["recordings"])
+    windows = int(vad_runner.estimate_windows(minutes, min(3, 2 * len(rec_cats))))
     for i, j in enumerate(plan["judges"]):
-        calls = len(judge_mod.CALIBRATION) + n_tl * sum(1 for m in plan["tl_models"]
-                                                        if any(x == j for x, _ in assignment[m["fp"]]))
+        calls = len(judge_mod.CALIBRATION) + n_tl * judge_mod.assigned_count(assignment, candidates, j)
         tin, tout = costs.judge_tokens(calls)
         if i == 0 and windows:
             vin, vout = costs.vad_judge_tokens(windows)
@@ -346,10 +365,10 @@ def estimate_cost(plan: dict, settings: dict):
 
 
 def _summary(con: Console, plan: dict, settings: dict, store_like) -> None:
-    entries = {llm_servers.fingerprint(e): e for e in settings_io.translation_models(settings)}
+    entries = settings_io.models_by_fp(settings)
     con.say("", "======== 開始前確認 ========")
     con.say(" 階段：" + "、".join(str(s) for s in plan["stages"])
-            + ("（沿用之前的階段 1）" if plan.get("reuse_stage1_from") else ""))
+            + ("（沿用之前的階段 1）" if plan["reuse_stage1_from"] else ""))
     con.say(" 資料集：" + "、".join(f"{datasets.DATASETS[k]['label']} {plan['clip_counts'][k]} 句" for k in plan["datasets"]))
     con.say(" 辨識模型：" + "、".join(CANDIDATES_BY_ID[a].label for a in plan["asr"]))
     con.say(" 翻譯模型：" + ("、".join(m["name"] for m in plan["tl_models"]) or "（無）"))
@@ -365,10 +384,10 @@ class _PlanView:
     """Enough of a RunStore for estimate_remaining before the run exists."""
 
     def __init__(self, plan):
-        self.plan = plan
+        self.plan = {**state.PLAN_DEFAULTS, **plan}
         self.state = {"tasks": [], "frozen": {}, "timing": {}}
 
-    def done_keys(self, kind, task_id):
+    def final_keys(self, kind, task_id):
         return set()
 
 
@@ -400,12 +419,10 @@ def cmd_start(con: Console, quick: bool = False) -> int:
     if state.running_pid():
         con.say("另一個評測正在執行中。")
         return 1
-    try:
-        settings = settings_io.load_settings()
-        config = settings_io.load_config()
-    except settings_io.SettingsError as e:
-        con.say(str(e))
+    loaded = _load_settings_config(con)
+    if loaded is None:
         return 1
+    settings, config = loaded
     if not quick:
         mode = con.choose_one("要跑哪一種？", [
             ("full", "完整評測：動畫 200 句、VTuber 200 句、基準 100 句（約 1.5–3 小時）"),
@@ -435,36 +452,56 @@ def cmd_resume(con: Console) -> int:
         con.say("另一個評測正在執行中，請等它結束（或關掉它的視窗）再繼續。")
         return 1
     try:
+        loaded = _load_settings_config(con)
+        if loaded is None:
+            return 1
+        settings, config = loaded
+        settings = _with_run_language(con, store, settings)
         failed = [t for t in store.state.get("tasks", []) if t["status"] == "failed"]
         con.say(f"繼續 {store.dir.name}，剩餘約 {describe_estimate(store)}。")
+        retry = False
         if failed:
             con.say("上次失敗的項目：")
             for t in failed:
                 con.say(f"  - {t['id']}：{t.get('reason')}")
             transient = all("下載" not in str(t.get("reason")) for t in failed)
-            if con.confirm("要重試這些項目嗎？（只會重做失敗的部分）", transient):
-                for t in failed:
-                    store.set_task(t["id"], status="pending", reason=None)
-                if any(t["id"].startswith("s1/") for t in failed) and store.frozen("rankings") is not None:
-                    con.say("注意：辨識排名已經固定，重試的辨識結果只會更新階段 1 的表格，不會改變後面用哪個模型。")
+            retry = con.confirm("要重試這些項目嗎？（只會重做失敗的部分）", transient)
+            if retry and any(t["id"].startswith("s1/") for t in failed) and store.frozen("rankings") is not None:
+                con.say("注意：辨識排名已經固定，重試的辨識結果只會更新階段 1 的表格，不會改變後面用哪個模型。")
+        if not con.confirm("開始？", True):
+            return 0  # nothing changed: the failure reasons stay for the report
+        if retry:
+            for t in failed:
+                store.set_task(t["id"], status="pending", reason=None)
         # judges run again over anything new (scored items are skipped)
         for t in store.state.get("tasks", []):
             if t["id"].startswith("s3judge/") or t["id"] == "s2judge":
                 store.set_task(t["id"], status="pending", reason=None)
-        try:
-            settings = settings_io.load_settings()
-            config = settings_io.load_config()
-        except settings_io.SettingsError as e:
-            con.say(str(e))
-            return 1
-        if not con.confirm("開始？", True):
-            return 0
-        store.state["status"] = "running"
-        store.state.pop("error", None)
-        store.save()
+        store.set_status("running")
     finally:
         state.release_lock()
     return _run(con, store, settings, config)
+
+
+def _load_settings_config(con: Console):
+    """(settings, config), or None after telling the user what is wrong."""
+    try:
+        return settings_io.load_settings(), settings_io.load_config()
+    except settings_io.SettingsError as e:
+        con.say(str(e))
+        return None
+
+
+def _with_run_language(con: Console, store, settings: dict) -> dict:
+    """A resumed run keeps the forced ASR language it started with, so its results stay
+    comparable (stage 3 translates what stage 1 recognised)."""
+    started = (store.plan["settings_snapshot"] or {}).get("asr_language")
+    current = settings.get("asr_language", "auto")
+    if started and started != current:
+        con.say(f"這次評測開始時指定的辨識語言是 {started}，目前的設定是 {current}；"
+                f"繼續時沿用 {started}，結果才能和前面的比較。")
+        return {**settings, "asr_language": started}
+    return settings
 
 
 # ---------------------------------------------------------------- report / apply
@@ -477,99 +514,83 @@ def _open(path: Path):
         print(f"請手動打開：{path}")
 
 
-def _read_recs(run_dir: Path) -> dict:
-    try:
-        data = json.loads((run_dir / "recommendations.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        log.warning(f"Unreadable recommendations in {run_dir}: {e}")
-        return {"items": []}
-    return data if isinstance(data, dict) else {"items": data, "status": None}
-
-
 def _pick_run(con: Console, need_recs: bool = False):
-    runs = state.RunStore.list_runs()
-    if need_recs:
-        runs = [r for r in runs if (r / "recommendations.json").exists() and _read_recs(r).get("items")]
-    runs = runs[:5]
+    """A RunStore of the 5 newest readable runs (with recommendations when asked), or None."""
+    runs = []
+    for run in state.RunStore.readable_runs():
+        if need_recs and not ((run.dir / "recommendations.json").exists() and report.load_recs(run.dir)["items"]):
+            continue
+        runs.append(run)
+        if len(runs) == 5:
+            break
     if not runs:
         con.say("還沒有評測結果。" if not need_recs else "還沒有產生推薦組合的評測（要跑完階段 3）。")
         return None
     status_names = {"done": "完成", "interrupted": "中斷", "error": "錯誤"}
-    options = []
-    for r in runs:
-        st = status_names.get(state.RunStore(r).state.get("status"), "未完成")
-        options.append((r, f"{r.name}（{st}）"))
+    options = [(run, f"{run.dir.name}（{status_names.get(run.state.get('status'), '未完成')}）") for run in runs]
     return con.choose_one("選擇一次評測：", options, 0)
 
 
 def cmd_report(con: Console) -> int:
-    from bench import report
-
-    run_dir = _pick_run(con)
-    if run_dir is None:
+    store = _pick_run(con)
+    if store is None:
         return 0
-    store = state.RunStore(run_dir)
     try:
         report.build(store)
     except Exception as e:  # show what failed instead of a traceback
         log.exception("Report failed")
         con.say(f"報告產生失敗：{e}")
         return 1
-    con.say(f"報告：{run_dir / 'report.html'}")
-    _open(run_dir / "report.html")
+    con.say(f"報告：{store.dir / 'report.html'}")
+    _open(store.dir / "report.html")
     return 0
+
+
+def _rec_label(r: dict) -> str:
+    vad = f"VAD {r['vad_threshold']:.2f}" if r["vad_measured"] else "VAD 維持目前設定（未實測）"
+    return (f"{r['id']} {analysis.CATEGORY_LABELS.get(r['category'], r['category'])}【{'、'.join(r['kinds'])}】"
+            f" {r['asr_label']} + {vad} + {r['tl_name']}" + ("" if r["recommended"] else "（不推薦）"))
 
 
 def cmd_apply(con: Console) -> int:
     if not _wait_app_closed(con):
         return 0
-    backups = settings_io.list_backups()
-    run_dir = _pick_run(con, need_recs=True)
-    if run_dir is None and not backups:
-        return 0
-    recs = _read_recs(run_dir) if run_dir else {"items": []}
-    if run_dir and recs.get("status") != "done":
-        con.say("這次評測沒有跑完，推薦是用不完整的結果算的。")
-        if not con.confirm("還是要從這次評測套用嗎？", False):
-            return 0
     try:
-        settings = settings_io.load_settings()
+        return _apply(con)
     except settings_io.SettingsError as e:
         con.say(str(e))
         return 1
-    options = [(r, f"{r['id']} {analysis.CATEGORY_LABELS.get(r['category'], r['category'])}【{'、'.join(r['kinds'])}】"
-                   f" {r['asr_label']} + VAD {r['vad_threshold']:.2f}"
-                   + ("" if r.get("vad_measured") else "（未實測）") + f" + {r['tl_name']}"
-                   + ("" if r["recommended"] else "（不推薦）")) for r in recs.get("items", [])]
+
+
+def _apply(con: Console) -> int:
+    backups = settings_io.list_backups()
+    run = _pick_run(con, need_recs=True)
+    if run is None and not backups:
+        return 0
+    recs = report.load_recs(run.dir) if run else {"items": [], "status": None}
+    if run and recs["status"] != "done":
+        con.say("這次評測沒有跑完，推薦是用不完整的結果算的。")
+        if not con.confirm("還是要從這次評測套用嗎？", False):
+            return 0
+    options = [(r, _rec_label(r)) for r in recs["items"]]
     if backups:
         options.append(("restore", f"R) 還原上次套用前的設定（{backups[0].name}）"))
     choice = con.choose_one("要套用哪一個組合？", options, 0)
     if choice is None:
         return 0
-    if choice == "restore":
+    if choice == "restore":  # before reading the settings: a broken file can still be restored
         if con.confirm(f"還原 {backups[0].name} 的設定？（目前的設定會先備份）", False):
-            try:
-                settings_io.restore(backups[0])
-            except settings_io.SettingsError as e:
-                con.say(str(e))
-                return 1
+            settings_io.restore(backups[0])
             con.say("已還原。")
         return 0
-    from bench.llm_servers import fingerprint
-
-    entry = next((m for m in settings_io.translation_models(settings)
-                  if fingerprint(m) == choice.get("tl_fp")
-                  or (not choice.get("tl_fp") and m.get("name") == choice["tl_name"] and m.get("model") == choice["tl_model"])),
-                 None)
+    settings = settings_io.load_settings()
+    entry = next((m for fp, m in settings_io.models_by_fp(settings).items()
+                  if fp == choice["tl_fp"]), None)
     if entry is None:
         con.say(f"設定檔裡找不到翻譯模型「{choice['tl_name']}」。")
         return 1
-    threshold = choice["vad_threshold"] if choice.get("vad_measured") else None
-    try:
-        changes = settings_io.planned_changes(settings, choice["asr"], threshold, entry)
-    except settings_io.SettingsError as e:
-        con.say(str(e))
-        return 1
+    threshold = choice["vad_threshold"] if choice["vad_measured"] else None
+    changes = settings_io.planned_changes(settings, choice["asr"], threshold, entry)
     if not changes:
         con.say("目前的設定已經是這個組合。")
         return 0
@@ -584,11 +605,7 @@ def cmd_apply(con: Console) -> int:
         con.say(f"  注意：{note}")
     if not con.confirm("確定套用？", False):
         return 0
-    try:
-        saved = settings_io.apply_changes(changes, entry)
-    except settings_io.SettingsError as e:
-        con.say(str(e))
-        return 1
+    saved = settings_io.apply_changes(changes, entry)
     con.say(f"已套用。原本的設定備份在 {saved}", "下次啟動 LiveTranslate 就會使用這個組合。")
     return 0
 

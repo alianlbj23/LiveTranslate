@@ -22,6 +22,7 @@ same row and the sample stays identical.
 
 Layout: bench_clips/<key>/<row:06d>.wav (16 kHz mono PCM_16) + <row:06d>.txt (reference)
 and bench_clips/<key>/manifest.json (row = position in the split, files in name order)."""
+import hashlib
 import io
 import json
 import logging
@@ -452,6 +453,19 @@ def download_dataset(key: str, source, n: int | None = None, progress=None, info
     if not m["complete"]:
         log.warning(f"{key}: only {len(m['clips'])}/{n} usable clips in the whole split")
     return m
+
+
+def sample_id(key: str, limit: int | None = None) -> dict | None:
+    """What identifies the test clips of a dataset (sampling method, pinned revision and
+    the first `limit` clip ids), so a later run can tell whether it measures the same
+    sentences. None without a usable manifest."""
+    m = read_manifest(key)
+    if not m or m.get("method") != METHOD:
+        return None
+    ids = [c["id"] for c in m.get("clips", [])]
+    ids = ids[:limit] if limit else ids
+    return {"method": m["method"], "revision": m.get("revision"),
+            "clips": hashlib.sha1(",".join(ids).encode("utf-8")).hexdigest()}
 
 
 def load_clips(key: str, limit: int | None = None) -> tuple[list[Clip], list[Clip]]:

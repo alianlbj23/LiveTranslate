@@ -37,6 +37,17 @@ CALIBRATION = [
     ("cal-opposite", "絶対に行かないよ。", "我一定會去的！", {"accuracy": (1, 3)}),
     ("cal-stiff", "ちょっと待ってよ、置いていかないで！", "稍微等待一下吧，不要把我放置後前往！", {"naturalness": (1, 6)}),
 ]
+CAL_PREFIX = "cal/"
+
+
+def cal_key(cal_id: str) -> str:
+    """Judge item id of a calibration sentence."""
+    return CAL_PREFIX + cal_id
+
+
+def item_key(model_fp: str, category: str, clip: str) -> str:
+    """Judge item id of one translation (written by the orchestrator, read by analysis)."""
+    return f"{model_fp}/{category}/{clip}"
 
 VAD_SYSTEM = (
     "你要檢查即時字幕的斷句品質。給你一段日文直播的「連續稿」（同一段聲音不經切段直接辨識的結果，視為參考）"
@@ -182,6 +193,11 @@ def assign_judges(candidates: list, judges: list) -> dict:
     return out
 
 
+def assigned_count(assignment: dict, candidates: list, judge: str) -> int:
+    """How many candidates `judge` scores."""
+    return sum(1 for c in candidates if any(j == judge for j, _ in assignment[c]))
+
+
 def item_mean(scores: dict) -> float:
     return mean(scores[c] for c in CRITERIA)
 
@@ -209,7 +225,9 @@ def calibration_report(records: list) -> dict:
     expect = {cid: exp for cid, _, _, exp in CALIBRATION}
     out = {}
     for r in records:
-        cid = r["item"].split("/", 1)[-1]
+        if not r["item"].startswith(CAL_PREFIX):
+            continue
+        cid = r["item"][len(CAL_PREFIX):]
         if cid not in expect:
             continue
         stat = out.setdefault(r["judge"], {"misses": 0, "items": 0})

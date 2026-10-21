@@ -1,12 +1,18 @@
 """Stage 2 VAD: run a recording through the app's VADProcessor in 32 ms chunks (as fast
 as possible: segmentation depends only on the chunk sequence, not on wall time), and cut
-the same recording into ~30 s windows for the continuous reference transcript."""
+the same recording into 20-30 s windows for the continuous reference transcript."""
 import numpy as np
 
 SR = 16000
 CHUNK = 512  # 32 ms, Silero's native window
 THRESHOLDS = (0.3, 0.4, 0.5, 0.6)
 DEFAULT_THRESHOLD = 0.5
+WINDOWS_PER_MINUTE = 2.5  # continuous windows are 20-30 s long
+
+
+def estimate_windows(minutes: float, n_asr: int) -> float:
+    """Judge calls of stage 2: every window, once per threshold, for every ASR."""
+    return minutes * WINDOWS_PER_MINUTE * len(THRESHOLDS) * n_asr
 VAD_SETTING_KEYS = ("vad_mode", "silence_mode", "silence_duration", "vad_min_speech_density",
                     "min_speech_duration", "max_speech_duration", "energy_threshold")
 
@@ -28,7 +34,8 @@ def make_vad(threshold: float, settings: dict):
 def segment_recording(audio: np.ndarray, vad) -> list:
     """[{"start", "end", "audio"}] in seconds. A segment ends where the samples still
     buffered in the VAD begin (backtrack splits keep a remainder); at the end silence is
-    fed the way main.py's capture loop does on stop, then the VAD is flushed."""
+    fed until the pause is long enough to close a segment (main.py's capture loop feeds
+    silence when no audio arrives), then the VAD is flushed."""
     segs = []
     fed = 0
 

@@ -350,6 +350,83 @@ def test_category_without_a_ranked_asr_is_reported_not_silently_skipped(world):
     assert "沒有任何辨識模型完成" in deps.out.getvalue()
 
 
+def test_reusing_stage1_requires_the_same_clips_and_language(world):
+    """Review finding: reuse compared only dataset names and counts. After the sample was
+    drawn again, or with another forced language, stage 3 silently translated nothing
+    (or text recognised under other settings)."""
+    from bench import datasets
+
+    ids = {d: datasets.sample_id(d, n) for d, n in world["counts"].items()}
+
+    def old_run(**kw):
+        run = RunStore.create(_plan(world, **kw))
+        for c in ["sensevoice", "mlt-nano", "anime-whisper", "whisper-turbo"]:
+            run.set_task(f"s1/{c}", status="done")
+        return run.dir.name
+
+    chosen, counts = ["anime", "vtuber"], world["counts"]
+    old_run()  # a run from before data_ids were recorded
+    assert cli._reusable_stage1(chosen, counts, ids, "ja") is None
+    old_run(data_ids={**ids, "anime": {**ids["anime"], "clips": "another sample"}},
+            settings_snapshot={"asr_language": "ja"})
+    assert cli._reusable_stage1(chosen, counts, ids, "ja") is None
+    good = old_run(data_ids=ids, settings_snapshot={"asr_language": "ja"})
+    assert cli._reusable_stage1(chosen, counts, ids, "ja") == good
+    assert cli._reusable_stage1(chosen, counts, ids, "auto") is None
+
+
+def test_stage3_without_matching_stage1_records_fails_with_the_reason(world):
+    old = _run(RunStore.create(_plan(world, stages=[1], asr=["sensevoice"])), _deps(world))
+    for f in (world["dir"] / "bench_clips").glob("*/manifest.json"):  # the sample was drawn again
+        m = json.loads(f.read_text(encoding="utf-8"))
+        for c in m["clips"]:
+            c["id"] = "9" + c["id"][1:]
+            (f.parent / f"{c['id']}.wav").write_bytes((f.parent / f"0{c['id'][1:]}.wav").read_bytes())
+        f.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    store = _run(RunStore.create(_one_model_plan(world, stages=[3], reuse_stage1_from=old.dir.name)), _deps(world))
+    task = store.task(f"s3tl/{FP['A Model']}")
+    assert task["status"] == "failed" and "對不上" in task["reason"]
+    assert not store.read("tl")
+
+
+def test_run_stops_when_test_clips_are_missing(world):
+    (world["dir"] / "bench_clips" / "anime" / "000004.wav").unlink()
+    store = RunStore.create(_plan(world, asr=["sensevoice"], stages=[1]))
+    with pytest.raises(RuntimeError, match="3/4"):
+        Bench(store, SETTINGS, CONFIG, _deps(world)).run()
+    assert RunStore(store.dir).state["status"] == "error"
+    assert not store.read("asr")
+
+
+def test_resume_keeps_the_language_the_run_started_with(world, monkeypatch, tmp_path):
+    RunStore.create(_plan(world, settings_snapshot={"asr_language": "ja"}))
+    settings_path = tmp_path / "user_settings.json"
+    settings_path.write_text(json.dumps({**SETTINGS, "asr_language": "auto"}), encoding="utf-8")
+    monkeypatch.setattr(cli.settings_io.paths, "SETTINGS_FILE", settings_path)
+    monkeypatch.setattr(settings_io, "find_running_app", lambda: [])
+    used = {}
+    monkeypatch.setattr(cli, "_run", lambda con, s, settings, config: used.update(settings) or 0)
+    out = []
+    assert cli.cmd_resume(cli.Console(input_fn=lambda p: "", print_fn=out.append)) == 0
+    assert used["asr_language"] == "ja" and any("ja" in line and "auto" in line for line in out)
+
+
+def test_cancelled_resume_keeps_the_failure_reasons(world, monkeypatch):
+    """Review finding: failed tasks were reset before the final "start?" question, so
+    answering n erased their reasons from the state and the report."""
+    store = RunStore.create(_plan(world))
+    store.set_task("s1/whisper-turbo", status="failed", reason="CUDA out of memory")
+    store.set_task(f"s3judge/{FP['A Model']}", status="failed", reason="401")
+    monkeypatch.setattr(settings_io, "find_running_app", lambda: [])
+    monkeypatch.setattr(settings_io, "load_settings", lambda: SETTINGS)
+    answers = iter(["y", "n"])  # retry the failed items: yes; start: no
+    assert cli.cmd_resume(cli.Console(input_fn=lambda p: next(answers), print_fn=lambda s: None)) == 0
+    again = RunStore(store.dir)
+    assert again.task("s1/whisper-turbo") == {**again.task("s1/whisper-turbo"), "status": "failed",
+                                              "reason": "CUDA out of memory"}
+    assert again.task(f"s3judge/{FP['A Model']}")["reason"] == "401"
+
+
 def test_reusing_stage1_requires_a_complete_matching_run(world, monkeypatch):
     old = RunStore.create(_plan(world, asr=["sensevoice"]))
     old.set_task("s1/sensevoice", status="done")

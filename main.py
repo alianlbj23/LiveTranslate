@@ -12,6 +12,7 @@ import traceback
 import urllib.request
 import queue
 import gc
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import yaml
 import time
@@ -289,11 +290,8 @@ class LiveTranslateApp:
         self._tl_backlog_threshold = 6
         self._tl_backlog_last_warn = 0.0
         self._tl_backlog_callback = None
-        # Forced ASR language: lines heard in another language are dropped (_heard_other_language)
-        self._lang_notice_callback = None
-        self._lang_drop_streak = 0
-        self._asr_hint_missing = False  # the model got no prompt hint for the language
-        self._asr_lang_support_key = None
+        self._lang_notice_callback = None  # tray notices (language filter, ASR errors)
+        self._init_language_filter_state()
 
         self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
 
@@ -455,7 +453,21 @@ class LiveTranslateApp:
         with self._asr_pending_lock:
             self._asr_pending_language = language
 
-    LANG_DROP_NOTICE_STREAK = 5
+    LANG_DROP_NOTICE_STREAK = 5       # this many dropped lines in a row: tell the user
+    LANG_DROP_NOTICE_RECENT = (5, 20)  # or this many of the last N judged lines ...
+    LANG_NOTICE_INTERVAL_S = 600.0     # ... at most once per interval
+    ASR_ERROR_NOTICE_STREAK = 3        # ASR loop errors in a row before a tray notice
+
+    def _init_language_filter_state(self):
+        """Forced ASR language: lines heard in another language are dropped
+        (_without_other_language); the counters below decide when to tell the user."""
+        self._lang_drop_streak = 0
+        self._lang_drop_heard = set()  # languages heard during the current streak
+        self._lang_recent = deque(maxlen=self.LANG_DROP_NOTICE_RECENT[1])  # True = dropped
+        self._lang_notice_at = None
+        self._asr_hint_missing = False  # the model got no prompt hint for the language
+        self._asr_lang_support_key = None
+        self._asr_error_streak = 0
 
     def _forced_asr_language(self) -> str:
         """The ASR language setting; "auto" when nothing is forced (or no panel yet)."""
@@ -463,70 +475,41 @@ class LiveTranslateApp:
             return "auto"
         return self._panel.get_settings().get("asr_language", "auto")
 
-    @staticmethod
-    def _engine_label(label):
-        """The engine's language label, or None when it gave none (SenseVoice answers
-        "auto" without a language tag, the remote engine "unknown")."""
-        return label if label and label not in ("auto", "unknown") else None
-
     def _heard_other_language(self, text: str, label: str):
         """The language `text` was heard in when it is not the forced ASR language, else
-        None. Uses the engine's label and, for ja / ko / en, the text's own script: one
-        label covers a whole interim buffer, so every sentence is judged by itself."""
-        forced = self._forced_asr_language()
-        if forced == "auto":
-            return None
-        engine_label = self._engine_label(label)
-        if engine_label and engine_label != forced:
-            return engine_label
-        if self._asr_hint_missing:
-            return None  # the model could not be told the language: do not judge its output
-        heard = asr_language.script_language(text, forced)
-        return heard if heard != forced else None
+        None (asr_language.heard_other_language: a foreign label wins; no script check
+        while the model got no language hint)."""
+        return asr_language.heard_other_language(text, label, self._forced_asr_language(), self._asr_hint_missing)
 
     def _without_other_language(self, text: str, label: str) -> str:
-        """`text` minus its sentences heard in another language than the forced one (each
-        one logged and dropped); "" when nothing is left. A label naming another language
-        drops the whole text at once."""
-        forced = self._forced_asr_language()
-        if forced == "auto":
-            return text
-        engine_label = self._engine_label(label)
-        if (
-            (engine_label and engine_label != forced)
-            or self._asr_hint_missing
-            or forced not in asr_language.SCRIPT_CHECKED_LANGUAGES
-        ):
-            heard = self._heard_other_language(text, label)
-            if heard:
-                self._drop_off_language(text, heard)
-                return ""
-            return text
-        parts = [p.strip() for p in self._split_sentences(text, forced) if p.strip()]
-        if len(parts) <= 1:
-            parts = [text]
-        kept = []
-        for part in parts:
-            heard = self._heard_other_language(part, label)
-            if heard:
-                self._drop_off_language(part, heard)
-            else:
-                kept.append(part)
-        if len(kept) == len(parts):
-            return text
-        return ("" if forced == "ja" else " ").join(kept)
+        """`text` minus its sentences heard in another language than the forced one, each
+        one logged and dropped (_drop_off_language); "" when nothing is left. The rules
+        (per sentence, or the whole text at once) are in asr_language.without_other_language."""
+        kept, dropped = asr_language.without_other_language(
+            text, label, self._forced_asr_language(), self._split_sentences, self._asr_hint_missing)
+        for part, heard in dropped:
+            self._drop_off_language(part, heard)
+        return kept
 
-    def _language_for(self, label: str) -> str:
-        """The source language of an accepted line: the forced language when the engine
-        gave no label."""
+    def _accept_language(self, text: str, label: str):
+        """(text without other-language sentences, its source language) for a line about
+        to be committed, or None when nothing is left. An accepted line ends a drop
+        streak; without an engine label the source language is the forced one."""
+        kept = self._without_other_language(text, label)
+        if not kept:
+            return None
+        self._lang_drop_streak = 0
+        self._lang_drop_heard.clear()
+        self._lang_recent.append(False)
         forced = self._forced_asr_language()
-        if forced != "auto" and not self._engine_label(label):
-            return forced
-        return label
+        if forced != "auto" and not asr_language.engine_label(label):
+            return kept, forced
+        return kept, label
 
     def _drop_off_language(self, text: str, heard: str):
         """Discard a line heard in another language: log it, take down its live preview,
-        and after a streak tell the user why no subtitles appear."""
+        and tell the user why lines are missing after a streak of drops, or when many of
+        the recent lines were dropped (at most once per LANG_NOTICE_INTERVAL_S)."""
         forced = self._forced_asr_language()
         log.info(f"Language filter: expected '{forced}' but got '{heard}', discarding: {text[:60]}")
         seq = self._live_seq
@@ -534,44 +517,58 @@ class LiveTranslateApp:
         if self._live_seq != seq and self._subwin:
             self._subwin.clear_live()
         self._lang_drop_streak += 1
+        self._lang_drop_heard.add(heard)
+        self._lang_recent.append(True)
+        heard_all = "、".join(sorted(self._lang_drop_heard))
+        dropped, window = sum(self._lang_recent), self.LANG_DROP_NOTICE_RECENT[1]
+        now = time.monotonic()
         if self._lang_drop_streak == self.LANG_DROP_NOTICE_STREAK:
+            self._lang_notice_at = now
             log.warning(
-                f"{self._lang_drop_streak} lines in a row were heard as '{heard}', not the "
+                f"{self._lang_drop_streak} lines in a row were heard as '{heard_all}', not the "
                 f"ASR language '{forced}', and were skipped"
             )
-            self._notify_language(
-                t("lang_filter_streak_msg").format(n=self._lang_drop_streak, got=heard, want=forced)
+            self._notify_user(
+                t("lang_filter_streak_msg").format(n=self._lang_drop_streak, got=heard_all, want=forced)
+            )
+        elif dropped >= self.LANG_DROP_NOTICE_RECENT[0] and (
+                self._lang_notice_at is None or now - self._lang_notice_at >= self.LANG_NOTICE_INTERVAL_S):
+            self._lang_notice_at = now
+            log.warning(
+                f"{dropped} of the last {len(self._lang_recent)} lines were heard in another language "
+                f"(latest '{heard}'), not the ASR language '{forced}', and were skipped"
+            )
+            self._notify_user(
+                t("lang_filter_share_msg").format(n=dropped, total=window, got=heard, want=forced)
             )
 
     def _note_asr_language_support(self, asr_type, funasr_key):
         """Fun-ASR-Nano / MLT-Nano only get the forced language as a prompt name, and some
-        languages have none (e.g. Nano + ko). Say so in the main log and the tray once per
-        (engine, model, language), and remember it for _heard_other_language."""
+        languages have none (e.g. Nano + ko). Say so in the main log and the tray whenever
+        the (engine, model, language) combination changes to one without a hint, and
+        remember it for _heard_other_language."""
         forced = self._forced_asr_language()
         key = (asr_type, funasr_key, forced)
         if key == self._asr_lang_support_key:
             return
         self._asr_lang_support_key = key
-        missing = False
-        if asr_type == "funasr" and forced != "auto":
-            profile = funasr_profile(funasr_key)
-            if profile.get("family") == "funasr-nano":
-                missing = asr_language.prompt_language_name(profile["legacy_engine"], forced) is None
-        self._asr_hint_missing = missing
-        if missing:
+        profile = funasr_profile(funasr_key) if asr_type == "funasr" else {}
+        self._asr_hint_missing = asr_language.hint_missing(profile, forced)
+        if self._asr_hint_missing:
             name = profile["display_name"]
             log.warning(
                 f"{name} does not support ASR language '{forced}': recognizing without a "
                 "language hint, results are not filtered by language"
             )
-            self._notify_language(t("asr_lang_unsupported_msg").format(model=name, lang=forced))
+            self._notify_user(t("asr_lang_unsupported_msg").format(model=name, lang=forced))
 
-    def _notify_language(self, text: str):
+    def _notify_user(self, text: str):
+        """Tray notice (language filter, ASR errors)."""
         if self._lang_notice_callback:
             try:
                 self._lang_notice_callback(text)
             except Exception:
-                log.warning("language notice callback failed", exc_info=True)
+                log.warning("tray notice callback failed", exc_info=True)
 
     def _set_asr_padding(self, engine_type: str, pad_seconds):
         with self._asr_pending_lock:
@@ -1583,12 +1580,10 @@ class LiveTranslateApp:
             )
             return
 
-        source_lang = result["language"]
-        original_text = self._without_other_language(original_text, source_lang)
-        if not original_text:
+        accepted = self._accept_language(original_text, result["language"])
+        if accepted is None:
             return
-        self._lang_drop_streak = 0
-        source_lang = self._language_for(source_lang)
+        original_text, source_lang = accepted
 
         self._invalidate_live_preview(original_text)
 
@@ -1969,11 +1964,10 @@ class LiveTranslateApp:
         original_text = text.strip()
         if not original_text or not any(c.isalnum() for c in original_text):
             return
-        original_text = self._without_other_language(original_text, source_lang)
-        if not original_text:
+        accepted = self._accept_language(original_text, source_lang)
+        if accepted is None:
             return
-        self._lang_drop_streak = 0
-        source_lang = self._language_for(source_lang)
+        original_text, source_lang = accepted
         # A sentence is being finalized: a late partial of it must not re-show it as live
         self._invalidate_live_preview(original_text)
 
@@ -2166,8 +2160,12 @@ class LiveTranslateApp:
                         self._process_interim_final(segment)
                     else:
                         self._process_segment(segment)
+                    self._asr_loop_ok()
                 except Exception:
                     log.error("ASR segment processing failed", exc_info=True)
+                    if self._interim_pending:
+                        log.warning(f"Dropping the buffered short text after that error: {self._interim_pending[:60]}")
+                    self._asr_loop_failed()
                 self._interim_active = False
                 self._interim_pending = ""
                 self._last_interim_samples = 0
@@ -2177,10 +2175,23 @@ class LiveTranslateApp:
                 try:
                     self._drain_interim_duplicates()
                     self._do_interim_asr()
+                    self._asr_loop_ok()
                 except Exception:
                     log.error("Interim ASR processing failed", exc_info=True)
+                    self._asr_loop_failed()
                 with self._vad_lock:
                     self._last_interim_samples = self._vad._speech_samples
+
+    def _asr_loop_ok(self):
+        self._asr_error_streak = 0
+
+    def _asr_loop_failed(self):
+        """Errors the loop survived: after a few in a row the subtitles have most likely
+        stopped, so tell the user instead of only logging."""
+        self._asr_error_streak += 1
+        if self._asr_error_streak == self.ASR_ERROR_NOTICE_STREAK:
+            log.error(f"{self._asr_error_streak} ASR segments in a row failed; subtitles may have stopped")
+            self._notify_user(t("asr_loop_error_msg").format(n=self._asr_error_streak))
 
     def _drain_interim_duplicates(self):
         while True:

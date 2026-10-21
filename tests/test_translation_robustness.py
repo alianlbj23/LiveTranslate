@@ -185,6 +185,8 @@ def _stub_app():
     app._tl_backlog_threshold = 3
     app._tl_backlog_last_warn = 0.0
     app._tl_backlog_callback = None
+    app._lang_notice_callback = None
+    app._init_language_filter_state()
     return app
 
 

@@ -169,7 +169,7 @@ def _deps(world, translator=None, app_running=None, is_cached=None):
                 translator_factory=translator or (lambda e, s, c: FakeTranslator(e)),
                 judge_factory=FakeJudge, ollama_factory=FakeOllama, vram=FakeVram(),
                 app_running=app_running or (lambda: []), sleep=lambda s: None, out=io.StringIO(),
-                is_cached=is_cached or (lambda cand: True), together_realtime=False)
+                is_cached=is_cached or (lambda cand: True), together_realtime=False, manage_ollama=False)
 
 
 def test_full_run_ranks_skips_cross_judges_and_reports(world):

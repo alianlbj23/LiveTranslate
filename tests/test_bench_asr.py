@@ -289,6 +289,37 @@ def test_model_availability():
     assert tl_runner.availability(cloud, None, None) == (False, "沒有 API key")
 
 
+# ---------------------------------------------------------------- Ollama / LM Studio
+
+def test_ollama_server_error_is_not_read_as_no_models():
+    """Review finding: an HTTP 500 from /api/tags parsed as "no models", and the run
+    reported "Ollama 裡沒有 X" although the model was installed."""
+    import httpx
+
+    def handler(request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(500, json={"error": "server busy"})
+        return httpx.Response(200, json={"models": [{"name": "qwen3.5:9b"}]})
+
+    server = llm_servers.Ollama("http://127.0.0.1:11434", http=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(httpx.HTTPStatusError):
+        server.installed()
+    assert server.loaded() == ["qwen3.5:9b"]
+
+
+@pytest.mark.parametrize("returncode, expected", [(0, True), (1, False)])
+def test_lmstudio_unload_reports_a_failed_cli(monkeypatch, caplog, real_llm_servers, returncode, expected):
+    """Review finding: `lms unload --all` failing (exit code != 0) still returned True."""
+    import subprocess
+
+    monkeypatch.setattr(llm_servers.shutil, "which", lambda name: "lms.exe")
+    monkeypatch.setattr(llm_servers.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], returncode, stdout="", stderr="no server running"))
+    with caplog.at_level("WARNING"):
+        assert real_llm_servers["lmstudio_unload_all"]() is expected
+    assert ("no server running" in caplog.text) is (not expected)
+
+
 # ---------------------------------------------------------------- Ollama settings in sync
 
 def test_fast_ollama_settings_match_the_launcher():

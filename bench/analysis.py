@@ -54,13 +54,14 @@ def _latest(records, key_fields):
 def asr_table(store) -> dict:
     """{dataset: {asr: stats}}; stats["complete"] False (with "reason") when the ASR
     failed or did not finish the dataset (it is then not ranked)."""
-    records = [r for r in _latest(store.read("asr"), ("asr", "dataset", "clip")) if not r.get("skip")]
+    raw = store.read("asr")
+    records = [r for r in _latest(raw, ("asr", "dataset", "clip")) if not r.get("skip")]
     meta = {}
     for m in store.read("asr_meta"):
         if str(m.get("task", "")).startswith("s1/"):
             meta[m["asr"]] = m
-    expected = store.plan.get("clip_counts", {})
-    skipped = {(r["dataset"], r["clip"]) for r in store.read("asr") if r.get("skip")}
+    expected = store.plan["clip_counts"]
+    skipped = {(r["dataset"], r["clip"]) for r in raw if r.get("skip")}
     table = {}
     for r in records:
         table.setdefault(r["dataset"], {}).setdefault(r["asr"], []).append(r)
@@ -98,7 +99,7 @@ def asr_table(store) -> dict:
             }
     for asr, m in meta.items():
         if m.get("status") != "ok":
-            for dataset in store.plan.get("datasets", []):
+            for dataset in store.plan["datasets"]:
                 out.setdefault(dataset, {}).setdefault(asr, {
                     "n": 0, "cer": None, "complete": False, "status": m.get("status"),
                     "reason": m.get("reason") or "沒有跑完"})
@@ -108,7 +109,14 @@ def asr_table(store) -> dict:
 def asr_rankings(store) -> dict:
     """{category: [asr ids best first]} for the categories in this run."""
     table = asr_table(store)
-    return {cat: scoring.rank_asr(table.get(cat, {})) for cat in CATEGORIES if cat in store.plan.get("datasets", [])}
+    return {cat: scoring.rank_asr(table.get(cat, {})) for cat in CATEGORIES if cat in store.plan["datasets"]}
+
+
+def frozen_rankings(store) -> dict:
+    """The rankings later stages used (frozen once after stage 1), or computed now for a
+    run that never got that far."""
+    rankings = store.frozen("rankings")
+    return rankings if rankings is not None else asr_rankings(store)
 
 
 # ---------------------------------------------------------------- stage 2
@@ -170,7 +178,8 @@ def tl_table(store) -> dict:
         errors = {}
         for r in tried:
             if not r["ok"]:
-                errors[r.get("error") or "?"] = errors.get(r.get("error") or "?", 0) + 1
+                kind = r.get("error") or "?"
+                errors[kind] = errors.get(kind, 0) + 1
         table[key] = {
             "n": len(recs), "tried": len(tried),
             "fail_rate": (len(tried) - len(ok)) / len(tried) if tried else None,
@@ -178,6 +187,23 @@ def tl_table(store) -> dict:
             "total_mean": mean(r["total_ms"] for r in ok) if ok else None,
             "errors": errors}
     return table
+
+
+def judge_scale(store) -> dict:
+    """{judge fp: {"offset", "clamped", "scored"}}: how far each judge's scale sits from
+    the others (subtracted before averaging) and how many of its aligned item scores fell
+    outside 1-10 and were clamped. A large offset means the judges disagree on the scale,
+    and clamping squeezes the ends of it."""
+    recs = _latest(store.read("judge"), ("judge", "item"))
+    offsets = judge_mod.judge_offsets(recs)
+    out = {j: {"offset": off, "clamped": 0, "scored": 0} for j, off in offsets.items()}
+    for r in recs:
+        if r.get("scores"):
+            s = out[r["judge"]]
+            s["scored"] += 1
+            if not 1.0 <= judge_mod.item_mean(r["scores"]) - s["offset"] <= 10.0:
+                s["clamped"] += 1
+    return out
 
 
 def quality_table(store) -> dict:
@@ -206,11 +232,11 @@ def quality_table(store) -> dict:
                 t["criteria"][c].append(1.0)
             continue
         t["to_judge"] += 1
-        item = f"{r['model']}/{r['category']}/{r['clip']}"
-        records = by_item.get(item, [])
+        records = by_item.get(judge_mod.item_key(r["model"], r["category"], r["clip"]), [])
         scored = [j for j in records if j.get("scores")]
         if not scored:
-            t["judge_fail"] += 1 if records else 0
+            if records:
+                t["judge_fail"] += 1
             continue
         t["judged"] += 1
         t["self_judged"] |= any(j.get("self") for j in scored)
@@ -233,9 +259,10 @@ def quality_table(store) -> dict:
 
 def together_table(store) -> dict:
     """{(asr, model fp, category): {...}}. A translation that failed while loaded
-    together counts with the translation timeout as its latency (it would have shown
-    nothing for that long); empty ASR output is not a translation failure."""
-    timeout_ms = 1000.0 * float(store.plan.get("tl_timeout_s") or DEFAULT_TL_TIMEOUT_S)
+    together counts with the translation timeout plus its ASR time as its latency (it
+    would have shown nothing for that long); empty ASR output is not a translation
+    failure. Failures keep their reason (error, detail) in the together records."""
+    timeout_ms = 1000.0 * float(store.plan["tl_timeout_s"] or DEFAULT_TL_TIMEOUT_S)
     meta = {(m["asr"], m["model"]): m for m in store.read("together_meta")}
     groups = {}
     for r in _latest(store.read("together"), ("asr", "model", "category", "clip")):
@@ -267,15 +294,14 @@ def together_table(store) -> dict:
 
 def combos(store) -> dict:
     """{category: [combo]} with composite score and flags, best first."""
-    frozen = store.state.get("frozen", {})
-    rankings = frozen.get("rankings") if frozen.get("rankings") is not None else asr_rankings(store)
+    rankings = frozen_rankings(store)
     thresholds = best_vad_thresholds(store)
     asr_stats = asr_table(store)
     quality = quality_table(store)
     tl = tl_table(store)
     together = together_table(store)
-    models = store.plan.get("tl_models", [])
-    vram_measured = frozen.get("vram_baseline_mb") is not None
+    models = store.plan["tl_models"]
+    vram_measured = store.frozen("vram_baseline_mb") is not None
     out = {}
     for cat, ranked in rankings.items():
         if not ranked:
