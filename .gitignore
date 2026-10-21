@@ -40,3 +40,5 @@ bench_results/
 
 # Built by launcher/build_exe.ps1 (setup.ps1 / build_release.ps1)
 /LiveTranslate.exe
+/.update/
+/VERSION.json

@@ -1,14 +1,19 @@
-﻿# 更新視窗：LiveTranslate 關閉之後，必要時重新安裝套件（requirements.txt 有變時），再重新啟動 LiveTranslate。
+﻿# 更新視窗：LiveTranslate 關閉之後，安裝下載好的新版本（-Zip，安裝包版本）、必要時重新安裝套件
+# （requirements.txt 有變時），再重新啟動 LiveTranslate。
 # 由 app_update.launch_restart 以隱藏的主控台啟動，畫面上只有這個小視窗；過程同時寫進 logs\update_*.log。
 param(
     [int]$ParentPid = 0,
     [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$Zip = "",        # 新版本的 zip（內容在 LiveTranslate\ 底下），複製到程式資料夾
+    [string]$StartedFile = "",  # 寫入這個檔表示視窗已經起來（LiveTranslate 等到它才結束）
     [switch]$Packages
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.Windows.Forms.Application]::EnableVisualStyles()
+if ($StartedFile) { Set-Content -LiteralPath $StartedFile -Value $PID -Encoding ascii }
 
 $Python  = Join-Path $Root ".venv\Scripts\python.exe"
 $PythonW = Join-Path $Root ".venv\Scripts\pythonw.exe"
@@ -92,7 +97,7 @@ function Set-Failed {
 function Start-LiveTranslate {
     $label.Text = "重新啟動 LiveTranslate…"
     Add-Line "啟動 LiveTranslate"
-    Start-Process -FilePath $PythonW -ArgumentList "main.py" -WorkingDirectory $Root | Out-Null
+    $script:AppProc = Start-Process -FilePath $PythonW -ArgumentList "main.py" -WorkingDirectory $Root -PassThru
 }
 
 function Start-Step {
@@ -144,6 +149,53 @@ function Stop-StepTree {
     }
 }
 
+function Start-PackageSteps {
+    Remove-Item -LiteralPath $Ready -Force -ErrorAction SilentlyContinue
+    $script:State = "steps"
+    Start-Step $Steps[0]
+}
+
+function Install-Release {
+    # Copy the downloaded release over the program files. The zip holds only program files,
+    # so .venv, models, user_settings.json, logs and transcripts are not touched.
+    $label.Text = "安裝新版本…"
+    Add-Line "> 安裝新版本：$Zip"
+    $work = Join-Path $Root ".update\new"
+    if (Test-Path -LiteralPath $work) { Remove-Item -Recurse -Force -LiteralPath $work }
+    # .NET refuses entries that would land outside $work (zip slip)
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $work)
+    $src = Join-Path $work "LiveTranslate"
+    if (-not (Test-Path -LiteralPath (Join-Path $src "main.py"))) {
+        Set-Failed "下載的新版本不完整，沒有更新（目前的版本仍可使用）。"
+        return $false
+    }
+    # config.yaml is in the release too: keep the user's edits in a copy
+    $config = Join-Path $Root "config.yaml"
+    $newConfig = Join-Path $src "config.yaml"
+    if ((Test-Path -LiteralPath $config) -and (Test-Path -LiteralPath $newConfig) -and
+            ((Get-FileHash -LiteralPath $config).Hash -ne (Get-FileHash -LiteralPath $newConfig).Hash)) {
+        $backup = Join-Path $Root ("config.backup_{0:yyyyMMdd_HHmmss}.yaml" -f (Get-Date))
+        Copy-Item -LiteralPath $config -Destination $backup
+        Add-Line "原本的 config.yaml 備份在 $backup"
+    }
+    # From here a half-copied folder must not look ready: LiveTranslate.exe then runs the
+    # installer again instead of starting a mix of old and new files
+    Remove-Item -LiteralPath $Ready -Force -ErrorAction SilentlyContinue
+    $out = & robocopy.exe $src $Root /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+    $code = $LASTEXITCODE
+    foreach ($l in @($out)) { if ("$l".Trim()) { Add-Line "$l".Trim() } }
+    if ($code -ge 8) {  # robocopy: 0-7 = copied / nothing to copy, 8+ = failures
+        $msg = ("複製新版本失敗（robocopy 結束代碼 {0}），程式檔案可能只更新了一部分。" -f $code) +
+               "請到 GitHub Releases 下載新版，解壓後覆蓋程式資料夾。"
+        Set-Failed $msg -NoStart
+        return $false
+    }
+    Remove-Item -Recurse -Force -LiteralPath (Join-Path $Root ".update") -ErrorAction SilentlyContinue
+    if (-not $Packages) { Set-Content -LiteralPath $Ready -Value (Get-Date -Format o) -Encoding ascii }
+    Add-Line "新版本已安裝。"
+    return $true
+}
+
 $btnStart.Add_Click({
     $btnStart.Enabled = $false
     try { Start-LiveTranslate } catch { Add-Line "無法啟動：$($_.Exception.Message)" }
@@ -151,13 +203,19 @@ $btnStart.Add_Click({
 
 $form.Add_FormClosing({
     param($source, $e)
-    if ($script:State -ne "steps" -or -not $script:Proc -or $script:Proc.HasExited) { return }
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-        "套件還在更新，要中止嗎？中止後下次開啟 LiveTranslate 會重新安裝缺少的套件。", "LiveTranslate 更新",
+    $running = ($script:State -eq "steps") -and $script:Proc -and -not $script:Proc.HasExited
+    if ($running) {
+        $question = "套件還在更新，要中止嗎？中止後下次開啟 LiveTranslate 會重新安裝缺少的套件。"
+    } elseif ($script:State -eq "wait") {
+        $question = "更新還沒開始，關閉後這次不會更新，LiveTranslate 也不會自動重新開啟。要關閉嗎？"
+    } else {
+        return
+    }
+    $answer = [System.Windows.Forms.MessageBox]::Show($question, "LiveTranslate 更新",
         [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question,
         [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { $e.Cancel = $true; return }
-    Stop-StepTree
+    if ($running) { Stop-StepTree }
 })
 
 # ---------- work, one step per timer tick so the window stays responsive ----------
@@ -181,13 +239,11 @@ $timer.Add_Tick({
                     return
                 }
                 if (-not (Test-Path -LiteralPath $PythonW)) { Set-Failed "找不到 $PythonW，請重新執行安裝。"; return }
-                if ($Packages) {
-                    Remove-Item -LiteralPath $Ready -Force -ErrorAction SilentlyContinue
-                    $script:State = "steps"
-                    Start-Step $Steps[0]
-                } else {
-                    $script:State = "launch"
+                if ($Zip) {
+                    $installed = @(Install-Release)[-1]  # the function's last output is its result
+                    if ($installed -ne $true) { return }
                 }
+                if ($Packages) { Start-PackageSteps } else { $script:State = "launch" }
             }
             "steps" {
                 if (Update-StepOutput) {
@@ -213,8 +269,14 @@ $timer.Add_Tick({
                 $script:State = "done"
             }
             "done" {
+                # a LiveTranslate that ends at once (a broken package) says so here instead of nothing
                 $script:DoneTicks++
-                if ($script:DoneTicks -ge 8) { $timer.Stop(); $form.Close() }
+                $app = $script:AppProc
+                if ($app -and $app.HasExited -and $app.ExitCode -ne 0) {
+                    Set-Failed ("LiveTranslate 啟動後馬上結束（結束代碼 {0}）。請用「LiveTranslate（除錯）.bat」啟動查看原因。" -f $app.ExitCode) -NoStart
+                    return
+                }
+                if ($script:DoneTicks -ge 25) { $timer.Stop(); $form.Close() }  # 5 s
             }
         }
     } catch {

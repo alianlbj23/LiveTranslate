@@ -111,6 +111,30 @@ def real_llm_servers():
     return dict(_REAL_LLM_SERVERS)
 
 
+_STANDIN_CS = """class P { static int Main(string[] a) {
+    string ms = System.Environment.GetEnvironmentVariable("STANDIN_MS");
+    string code = System.Environment.GetEnvironmentVariable("STANDIN_CODE");
+    System.Threading.Thread.Sleep(string.IsNullOrEmpty(ms) ? 0 : int.Parse(ms));
+    return string.IsNullOrEmpty(code) ? 0 : int.Parse(code); } }"""
+
+
+@pytest.fixture(scope="session")
+def standin_exe(tmp_path_factory):
+    """A windowless program that plays pythonw.exe in launcher tests: sleeps STANDIN_MS, exits
+    with STANDIN_CODE (0 by default; System32 programs such as whoami exit 1 on "main.py")."""
+    import subprocess
+
+    csc = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
+    if sys.platform != "win32" or not csc.exists():
+        pytest.skip("Windows C# compiler")
+    d = tmp_path_factory.mktemp("standin")
+    (d / "p.cs").write_text(_STANDIN_CS, encoding="utf-8")
+    r = subprocess.run([str(csc), "/nologo", "/target:winexe", f"/out:{d / 'pythonw.exe'}", str(d / "p.cs")],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout
+    return d / "pythonw.exe"
+
+
 @pytest.fixture
 def real_ollama_server():
     """The real ollama_server functions / Ollama class the guard replaces, for tests of

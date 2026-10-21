@@ -460,7 +460,7 @@ btn_update_check: "檢查更新"
 btn_update_apply: "更新並重新啟動"
 update_not_checked: "尚未檢查"
 update_checking: "檢查中…"
-update_not_git: "這是安裝包版本，請到 GitHub Releases 下載新版"
+update_not_git: "讀不到版本資訊，請到 GitHub Releases 下載新版"
 update_no_git: "找不到 git，無法檢查更新"
 update_detached: "目前不在任何分支上，略過更新"
 update_local_branch: "目前的分支（{branch}）只在這台電腦上，GitHub 上沒有，無法檢查更新"
@@ -482,3 +482,13 @@ btn_bench: "開啟評測"
 bench_confirm_title: "最佳組合評測"
 bench_confirm_text: "評測會用到整張顯示卡，所以 LiveTranslate 會先關閉；評測視窗裡可以再把它開回來。要繼續嗎？"
 bench_launch_failed: "無法開啟評測視窗，詳細原因在記錄檔。"
+
+# Updates of a release package
+update_release_up_to_date: "已是最新版本（{version}）"
+update_release_newer: "有新版本 {latest}（目前 {version}）"
+update_release_tray: "有新版本 {latest}，可以到 設定 → 首頁 → 維護 更新。"
+update_release_confirm: "要下載 {latest} 並重新啟動 LiveTranslate 嗎？翻譯會中斷十幾秒；如果套件有變動，重新安裝可能需要幾分鐘。設定、模型與記錄都會保留。"
+
+# Updates of a release package (2)
+update_no_release: "GitHub 上還沒有可以更新的版本（目前 {version}）"
+update_release_not_installed: "新版本已下載，但更新視窗沒有啟動，所以還沒安裝；請再按一次「更新並重新啟動」（原因在 logs\\update_launch.log）。"

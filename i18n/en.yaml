@@ -461,7 +461,7 @@ btn_update_check: "Check for updates"
 btn_update_apply: "Update and restart"
 update_not_checked: "Not checked yet"
 update_checking: "Checking…"
-update_not_git: "This is a release package; download new versions from GitHub Releases"
+update_not_git: "No version information; download new versions from GitHub Releases"
 update_no_git: "git not found; cannot check for updates"
 update_detached: "Not on a branch; updates skipped"
 update_local_branch: "The current branch ({branch}) exists only on this computer, not on GitHub; cannot check for updates"
@@ -483,3 +483,13 @@ btn_bench: "Open benchmark"
 bench_confirm_title: "Best-combination benchmark"
 bench_confirm_text: "The benchmark needs the whole graphics card, so LiveTranslate closes first; the benchmark window can open it again. Continue?"
 bench_launch_failed: "Cannot open the benchmark window; see the log for details."
+
+# Updates of a release package
+update_release_up_to_date: "Up to date ({version})"
+update_release_newer: "New version {latest} (installed {version})"
+update_release_tray: "New version {latest}; update in Settings → Home → Maintenance."
+update_release_confirm: "Download {latest} and restart LiveTranslate? Translation stops for a few seconds; reinstalling changed packages can take a few minutes. Settings, models and logs are kept."
+
+# Updates of a release package (2)
+update_no_release: "No release to update to on GitHub (installed {version})"
+update_release_not_installed: "The new version is downloaded but the update window did not start, so it is not installed; press \"Update and restart\" again (details in logs\\update_launch.log)."

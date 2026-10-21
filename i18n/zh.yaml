@@ -460,7 +460,7 @@ btn_update_check: "检查更新"
 btn_update_apply: "更新并重新启动"
 update_not_checked: "尚未检查"
 update_checking: "检查中…"
-update_not_git: "这是安装包版本，请到 GitHub Releases 下载新版"
+update_not_git: "读不到版本信息，请到 GitHub Releases 下载新版"
 update_no_git: "找不到 git，无法检查更新"
 update_detached: "当前不在任何分支上，跳过更新"
 update_local_branch: "当前的分支（{branch}）只在这台电脑上，GitHub 上没有，无法检查更新"
@@ -482,3 +482,13 @@ btn_bench: "打开评测"
 bench_confirm_title: "最佳组合评测"
 bench_confirm_text: "评测会用到整张显卡，所以 LiveTranslate 会先关闭；评测窗口里可以再把它打开。要继续吗？"
 bench_launch_failed: "无法打开评测窗口，详细原因在日志。"
+
+# Updates of a release package
+update_release_up_to_date: "已是最新版本（{version}）"
+update_release_newer: "有新版本 {latest}（当前 {version}）"
+update_release_tray: "有新版本 {latest}，可以到 设置 → 首页 → 维护 更新。"
+update_release_confirm: "要下载 {latest} 并重新启动 LiveTranslate 吗？翻译会中断十几秒；如果依赖包有变动，重新安装可能需要几分钟。设置、模型与日志都会保留。"
+
+# Updates of a release package (2)
+update_no_release: "GitHub 上还没有可以更新的版本（当前 {version}）"
+update_release_not_installed: "新版本已下载，但更新窗口没有启动，所以还没安装；请再按一次「更新并重新启动」（原因在 logs\\update_launch.log）。"

@@ -54,6 +54,18 @@ Write-Step "Building LiveTranslate.exe..."
 if ($LASTEXITCODE -ne 0) { throw "LiveTranslate.exe build failed" }
 Write-Ok "LiveTranslate.exe"
 
+# ── 3b. VERSION.json: the app's update check compares it with this repository's latest release ──
+$Repo = $env:GITHUB_REPOSITORY   # set on GitHub Actions
+if (-not $Repo) {
+    $origin = "$(& git remote get-url origin)".Trim()
+    if ($origin -match 'github\.com[:/]([^/]+/[^/]+?)(\.git)?$') { $Repo = $Matches[1] }
+}
+if (-not $Repo) { throw "cannot tell the GitHub repository (git remote origin)" }
+$VersionInfo = [ordered]@{ version = $Tag; repo = $Repo; built = (Get-Date).ToUniversalTime().ToString("o") }
+[IO.File]::WriteAllText((Join-Path $Stage "VERSION.json"), ($VersionInfo | ConvertTo-Json),
+                        (New-Object System.Text.UTF8Encoding $false))
+Write-Ok "VERSION.json ($Tag, $Repo)"
+
 # ── 4. Zip ──
 Write-Step "Creating archive..."
 Compress-Archive -Path $Stage -DestinationPath $ZipPath -Force

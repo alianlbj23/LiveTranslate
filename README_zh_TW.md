@@ -64,7 +64,7 @@ cd LiveTranslate
 
 雙擊 **`LiveTranslate（除錯）.bat`**（除錯入口）：第一次會在命令列執行同一套安裝（`launcher\setup.ps1`）並產生 `LiveTranslate.exe`；之後雙擊 `LiveTranslate.exe` 開啟（沒有命令列），或繼續用除錯入口看即時記錄。
 
-更新：LiveTranslate 開啟後會在背景檢查 GitHub；有新版本時到 設定 → 首頁 → 維護 →「更新並重新啟動」。
+更新：LiveTranslate 開啟後會在背景檢查 GitHub（安裝包比對 `VERSION.json` 與最新的 Release，原始碼版抓目前的分支），有新版本時系統匣會提醒；到 設定 → 首頁 → 維護 →「更新並重新啟動」才會更新，設定、模型與記錄都會保留。
 
 <details>
 <summary>手動安裝</summary>

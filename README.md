@@ -59,7 +59,7 @@ cd LiveTranslate
 
 Double-click **`LiveTranslate（除錯）.bat`** (debug entry): the first time it runs the same installer (`launcher\setup.ps1`) in a console and builds `LiveTranslate.exe`. Then start with `LiveTranslate.exe` (no console), or keep using the debug entry to see the live log.
 
-Updates: LiveTranslate checks GitHub in the background after it starts; when there is a new version, use Settings → Home → Maintenance → "Update and restart".
+Updates: LiveTranslate checks GitHub in the background after it starts (the release package compares its `VERSION.json` with the latest GitHub release, a git checkout fetches its branch) and shows a tray notice; nothing changes until you use Settings → Home → Maintenance → "Update and restart". Settings, models and logs are kept.
 
 <details>
 <summary>Manual install</summary>

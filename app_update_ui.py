@@ -1,7 +1,8 @@
 """Qt side of app_update: checks on a thread and shows the state on the control panel's
-Maintenance card; a quiet check after start notifies once when GitHub has new versions.
-"Update and restart" pulls, starts launcher/update_window.ps1 (packages, then restart)
-and quits LiveTranslate."""
+Maintenance card; a quiet check after start notifies once when GitHub has something newer.
+"Update and restart" pulls (git checkout) or downloads the release zip (release package),
+starts launcher/update_window.ps1 (copy the release, packages, then restart) and quits
+LiveTranslate. Nothing is updated without the user's click."""
 import logging
 import os
 import threading
@@ -24,6 +25,9 @@ def status_text(s: app_update.UpdateStatus) -> str:
         app_update.UP_TO_DATE: t("update_up_to_date").format(branch=s.branch),
         app_update.BEHIND: t("update_behind").format(n=s.behind, branch=s.branch),
         app_update.DIRTY: t("update_dirty").format(n=s.behind),
+        app_update.RELEASE_UP_TO_DATE: t("update_release_up_to_date").format(version=s.version),
+        app_update.RELEASE_NEWER: t("update_release_newer").format(latest=s.latest, version=s.version),
+        app_update.NO_RELEASE: t("update_no_release").format(version=s.version),
     }.get(s.state, s.state)
 
 
@@ -33,10 +37,10 @@ class UpdateController(QObject):
     LiveTranslate the normal way (GPU released, settings saved)."""
 
     _checked = pyqtSignal(object, bool)
-    _pulled = pyqtSignal(object, object)
+    _handed_over = pyqtSignal(bool, object)   # the update window runs, error text
 
     def __init__(self, show_status, notify, confirm, quit_app, check=None, pull=None, launch=None,
-                 pid=None, parent=None):
+                 download=None, pid=None, parent=None):
         super().__init__(parent)
         self._show = show_status
         self._notify = notify
@@ -45,11 +49,12 @@ class UpdateController(QObject):
         self._check_fn = check or app_update.check
         self._pull_fn = pull or app_update.pull
         self._launch_fn = launch or app_update.launch_restart
+        self._download_fn = download or app_update.download_release
         self._pid = pid or os.getpid()
         self.status = None
         self._busy = False
         self._checked.connect(self._on_checked)
-        self._pulled.connect(self._on_pulled)
+        self._handed_over.connect(self._on_handed_over)
 
     def check(self, quiet: bool = False) -> bool:
         if self._busy:
@@ -75,7 +80,10 @@ class UpdateController(QObject):
             log.info(f"Update check: {status.state} ({status.detail})")
         self._show(status_text(status), status.can_update, False)
         if quiet and status.can_update:
-            self._notify(t("update_tray").format(n=status.behind))
+            if status.state == app_update.RELEASE_NEWER:
+                self._notify(t("update_release_tray").format(latest=status.latest))
+            else:
+                self._notify(t("update_tray").format(n=status.behind))
 
     def apply(self) -> bool:
         s = self.status
@@ -83,30 +91,48 @@ class UpdateController(QObject):
             return False
         # busy while asking too: the quiet check after start must not run during the question
         self._busy = True
-        if not self._confirm(t("update_confirm_title"), t("update_confirm_text").format(n=s.behind)):
+        release = s.state == app_update.RELEASE_NEWER
+        text = (t("update_release_confirm").format(latest=s.latest) if release
+                else t("update_confirm_text").format(n=s.behind))
+        if not self._confirm(t("update_confirm_title"), text):
             self._busy = False
             return False
         self._show(t("update_pulling"), False, True)
 
         def work():
+            # fetch (git pull / release download), then hand over to the update window; the
+            # launch waits until the window reports that it runs, so it stays off the GUI thread
             try:
-                changed, error = self._pull_fn(s.branch)
+                if release:
+                    release_zip, error = self._download_fn(s)
+                    if error:
+                        self._handed_over.emit(False, t("update_failed").format(e=error))
+                        return
+                    packages = app_update.release_packages_changed(release_zip)
+                else:
+                    release_zip = None
+                    changed, error = self._pull_fn(s.branch)
+                    if error:
+                        self._handed_over.emit(False, t("update_failed").format(e=error))
+                        return
+                    packages = app_update.packages_changed(changed)
+                if self._launch_fn(self._pid, packages, release_zip=release_zip):
+                    self._handed_over.emit(True, None)
+                else:  # a release is downloaded but not installed; a git pull is already done
+                    self._handed_over.emit(False, t("update_release_not_installed") if release
+                                           else t("update_restart_failed"))
             except Exception as e:  # shown on the card and logged
                 log.exception("Update failed")
-                changed, error = [], str(e)
-            self._pulled.emit(changed, error)
-        threading.Thread(target=work, name="UpdatePull", daemon=True).start()
+                self._handed_over.emit(False, t("update_failed").format(e=e))
+        threading.Thread(target=work, name="UpdateFetch", daemon=True).start()
         return True
 
-    @pyqtSlot(object, object)
-    def _on_pulled(self, changed, error):
+    @pyqtSlot(bool, object)
+    def _on_handed_over(self, ok, message):
         self._busy = False
-        if error:
-            log.error(f"Update failed: {error}")
-            self._show(t("update_failed").format(e=error), False, False)
+        if not ok:
+            log.error(f"Update not finished: {message}")
+            self._show(message, False, False)
             return
-        if self._launch_fn(self._pid, app_update.packages_changed(changed)):
-            log.info("Restarting for the update")
-            self._quit()
-        else:
-            self._show(t("update_restart_failed"), False, False)
+        log.info("Restarting for the update")
+        self._quit()
