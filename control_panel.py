@@ -390,6 +390,11 @@ class ControlPanel(FluentWindow):
         page.add_group(info)
 
         maint = SettingCardGroup(t("group_maintenance"), page.view)
+        self._env_check_btn = PushButton(t("btn_env_check"))
+        self._env_check_btn.clicked.connect(self._on_env_check_clicked)
+        maint.addSettingCard(_WidgetCard(
+            FIF.DEVELOPER_TOOLS, t("label_env_check"), self._env_check_btn, content=t("desc_env_check"),
+        ))
         self._factory_reset_btn = PushButton(t("btn_factory_reset"))
         self._factory_reset_btn.clicked.connect(self._on_factory_reset_clicked)
         maint.addSettingCard(_WidgetCard(
@@ -398,6 +403,11 @@ class ControlPanel(FluentWindow):
         page.add_group(maint)
         page.finish()
         return page
+
+    def _on_env_check_clicked(self):
+        from env_check_ui import EnvCheckDialog
+
+        EnvCheckDialog(self.get_active_model(), parent=self).exec()
 
     def _on_home_toggle(self):
         if self._home_running:
