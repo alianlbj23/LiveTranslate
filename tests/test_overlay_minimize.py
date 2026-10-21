@@ -179,3 +179,27 @@ def test_texts_for_minimize_and_tray_click(lang):
     hint = re.search(r"^hide_tray_hint: \"([^\"]+)\"$", text, re.M).group(1)
     assert not re.search(r"右鍵|右键|Right-click", hint)  # a left click brings it back now
     assert re.search(r"點|单击|Click", hint)
+
+
+def test_minimized_window_does_not_repaint(qapp, ov):
+    """Bug (2026-10-21): the overlay is a layered (translucent) window, and every repaint while
+    minimized (the live MIC / RMS / VAD bars) drew it back at its old place on screen."""
+    ov.minimize_to_taskbar()
+    _settle(qapp)
+    assert not ov.updatesEnabled()
+    ov.restore_window()
+    _settle(qapp)
+    assert ov.updatesEnabled()
+
+
+def test_minimized_from_outside_does_not_repaint_either(qapp, ov):
+    """With the Taskbar toggle on, a click on the taskbar button minimizes the window without
+    the header button; the paint stop must still apply."""
+    ov._handle._taskbar_check.setChecked(True)
+    _settle(qapp)
+    ov.showMinimized()  # what Windows does on a taskbar click
+    _settle(qapp)
+    assert not ov.updatesEnabled()
+    ov.showNormal()
+    _settle(qapp)
+    assert ov.updatesEnabled()

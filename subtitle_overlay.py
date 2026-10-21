@@ -1264,6 +1264,9 @@ class SubtitleOverlay(QWidget):
         again with the new flags."""
         if self.isMinimized():
             return
+        # This translucent (layered) window is drawn back at its old place by any repaint
+        # while minimized, so painting stops until it is restored (see changeEvent)
+        self.setUpdatesEnabled(False)
         flags = self.windowFlags()
         if (flags & _TYPE_MASK) == Qt.WindowType.Tool:
             self._tool_flag_after_restore = True
@@ -1298,8 +1301,15 @@ class SubtitleOverlay(QWidget):
 
     def changeEvent(self, event):
         super().changeEvent(event)
-        if (event.type() == QEvent.Type.WindowStateChange and self._tool_flag_after_restore
-                and not self.isMinimized()):
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        if self.isMinimized():
+            # also minimized from the taskbar button (Taskbar toggle on): no repaints, see above
+            self.setUpdatesEnabled(False)
+            return
+        if not self.updatesEnabled():
+            self.setUpdatesEnabled(True)
+        if self._tool_flag_after_restore:
             # Restored (taskbar click or tray): changing flags inside this event is unsafe
             self._tool_flag_timer.start()
 
