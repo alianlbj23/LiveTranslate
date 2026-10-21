@@ -180,6 +180,20 @@ class _FakeClient:
         self.closed = True
 
 
+def test_every_candidate_carries_what_the_tool_needs():
+    """Each ASR's data lives in AsrCandidate (it used to be four tables keyed by id that
+    nothing kept in sync): a new candidate cannot miss one of them."""
+    for cand in asr_runner.ASR_CANDIDATES:
+        settings = cand.app_settings()
+        assert settings["asr_engine"] in asr_runner.ENGINE_TYPES
+        assert ("funasr_model" in settings) == (cand.engine_type == "funasr")
+        assert cand.download_bytes > 0 and cand.default_item_s > 0
+    with pytest.raises(ValueError):
+        asr_runner.AsrCandidate("x", "X", "funasr")  # FunASR without a model
+    with pytest.raises(ValueError):
+        asr_runner.AsrCandidate("x", "X", "whisperx")
+
+
 def test_session_restarts_a_dead_worker_once():
     _FakeClient.instances.clear()
     plan = {"die": 1}

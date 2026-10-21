@@ -259,7 +259,7 @@ def test_run_pauses_while_livetranslate_is_open(world):
     assert "評測暫停" in deps.out.getvalue()
 
 
-def test_translation_model_failing_every_sentence_is_marked_failed(world):
+def test_translation_model_failing_every_sentence_scores_1(world):
     class Broken:
         def translate_iter(self, text, source_language="ja"):
             raise ConnectionError("refused")

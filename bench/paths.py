@@ -25,4 +25,4 @@ def live_dir() -> Path:
 
 SETTINGS_FILE = ROOT / "user_settings.json"
 CONFIG_FILE = ROOT / "config.yaml"
-SELECTED_MODEL_FILE = ROOT / "launcher" / "selected_model.txt"
+# The launcher's model choice is local_models.SELECTED_MODEL_FILE (shared with the app)

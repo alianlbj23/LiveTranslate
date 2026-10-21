@@ -401,3 +401,31 @@ def test_aligned_scores_stay_on_the_1_to_10_scale():
     q = analysis.quality_table(Store())[("m", "anime")]
     assert q["quality"] == 10.0
     assert all(v == 10.0 for v in q["criteria"].values())
+
+
+def test_aligned_scores_stay_on_the_1_to_10_scale_at_the_bottom_too():
+    """The generous judge's offset (+2) is subtracted from its scores; its 1 must not
+    become -1."""
+    from bench import analysis
+
+    class Store:
+        plan = {"tl_models": []}
+
+        def read(self, kind):
+            full = {c: 10 for c in judge.CRITERIA}
+            low = {c: 6 for c in judge.CRITERIA}
+            one = {c: 1 for c in judge.CRITERIA}
+            if kind == "tl":
+                return [{"model": "m", "category": "anime", "clip": "1", "source": "x", "ok": True}]
+            if kind == "judge":
+                # shared item: A says 10, B says 6 -> A's offset is +2; A's 1 on m/anime/1 would be -1
+                return [{"judge": "A", "item": "shared", "scores": full},
+                        {"judge": "B", "item": "shared", "scores": low},
+                        {"judge": "A", "item": "m/anime/1", "scores": one}]
+            return []
+
+    q = analysis.quality_table(Store())[("m", "anime")]
+    assert q["quality"] == 1.0 and all(v == 1.0 for v in q["criteria"].values())
+    scale = analysis.judge_scale(Store())
+    assert scale["A"] == {"offset": 2.0, "clamped": 1, "scored": 2}
+    assert scale["B"]["clamped"] == 0

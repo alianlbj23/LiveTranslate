@@ -1,9 +1,11 @@
 """Translation model servers: classify a model entry, and load / unload local models so
 each one is measured alone (Ollama) or at least waited out (LM Studio).
 
-Ollama is started with the same fast settings as launcher/start_jp_subtitles.ps1, so the
-numbers match real use. main.py's release_gpu / _warm_local_model cannot be imported
-(main pulls in PyQt), so the same /api/ps + keep_alive calls are made here."""
+When the benchmark starts (or, with the user's consent, restarts) Ollama itself, it uses
+the same fast settings as launcher/start_jp_subtitles.ps1, so the numbers match real
+use; an Ollama the user started from the tray keeps its own settings. main.py's
+release_gpu / _warm_local_model cannot be imported (main pulls in PyQt), so the same
+/api/ps + keep_alive calls are made here."""
 import logging
 import os
 import shutil

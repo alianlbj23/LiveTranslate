@@ -172,7 +172,7 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | `D:\workspace\language_translate\launcher\start_jp_subtitles.ps1` | 啟動邏輯：檢查/啟動 Ollama → 確認模型 → 校正 API 埠 → 啟動 LiveTranslate |
 | `launcher\menu.ps1` | 入口：開啟動視窗（`gui.ps1`），視窗開不了時改用文字選單；也可 `-Action start|verify|setup` 直接執行 |
 | `launcher\gui.ps1` | 啟動視窗（WinForms）：啟動字幕、翻譯模型清單（顯示是否已下載與大小，下載前確認）、檢查環境、最佳組合評測、使用說明 |
-| `launcher\bench.ps1` / `launcher\bench_run.py` / `bench\` | 最佳組合評測：下載測試資料、分階段評測（辨識 → 語音偵測閾值 → 翻譯）、看報告（`bench_results\<日期時間>\report.html`）、套用推薦組合。測試資料在 `bench_clips\`，兩個資料夾都不會加入 git |
+| `launcher\bench.ps1` / `launcher\bench_run.py` / `bench\` | 最佳組合評測：下載測試資料、分階段評測（辨識 → 語音偵測閾值 → 翻譯）、看報告（`bench_results\<日期時間>\report.html`）、套用推薦組合。測試資料在 `bench_clips\`（下載紀錄 `bench_clips\download.log`），兩個資料夾都不會加入 git。第 2 階段（語音偵測閾值）要用自己的錄音：VTuber 放在 `bench_clips\live\`，動畫放在 `bench_clips\live\anime\`（wav / flac / mp3 / ogg）；沒有錄音就略過，閾值維持目前的設定。套用前的設定備份在 `bench_results\settings_backups\`，刪掉 `bench_results` 備份也會一起刪掉 |
 | `local_models.json` / `local_models.py` | 本機翻譯模型清單（Qwen3.5 9B / 4B、Sakura GalTransl 7B）；啟動時把已下載的模型同步成設定裡的模型項目，執行中切換會記住選擇 |
 | `launcher\model.ps1` | 讀寫 `launcher\selected_model.txt`（目前選用的翻譯模型）並驗證名稱；啟動、檢查、選單共用 |
 | `launcher\update.ps1` | 每次啟動的自動更新檢查（git fetch/pull --ff-only，requirements 變了才重裝套件） |

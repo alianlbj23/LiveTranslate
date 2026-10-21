@@ -6,8 +6,9 @@ composite = 100 * (0.6 q + 0.2 r + 0.2 l)
   l = clamp((3000 - L) / 2500, 0, 1): L <= 0.5 s scores 1, L >= 3 s scores 0. Fixed
       anchors so runs can be compared.
   L = mean end-to-end latency with ASR and translation loaded together (queue + ASR +
-      full translation). The VAD silence wait (~0.5 s) is the same for every
-      combination and is listed separately, not added.
+      full translation); a translation that failed there counts as the translation
+      timeout plus its ASR time (analysis.together_table). The VAD silence wait
+      (~0.5 s) is the same for every combination: noted in the report, not added.
 Not recommended: L > 2000 ms, peak VRAM > 11 GB, or missing measurements."""
 import math
 
@@ -24,11 +25,6 @@ def p90(values):
         return None
     k = max(0, math.ceil(0.9 * len(vals)) - 1)
     return vals[k]
-
-
-def mean_or_none(values):
-    vals = [v for v in values if v is not None]
-    return sum(vals) / len(vals) if vals else None
 
 
 def clamp01(x: float) -> float:
@@ -53,7 +49,8 @@ def rank_asr(stats: dict) -> list:
 
 
 def judge_combo(combo: dict) -> dict:
-    """Fills composite, recommended, reasons, warnings."""
+    """Fills composite, recommended, reasons, warnings. composite is not None only when
+    quality, cer and latency_ms all are (recommend() relies on that)."""
     reasons, warnings = [], []
     labels = {"quality": "翻譯品質", "cer": "辨識準確度", "latency_ms": "同時載入延遲"}
     missing = [k for k in ("quality", "cer", "latency_ms") if combo.get(k) is None]
@@ -84,8 +81,8 @@ def judge_combo(combo: dict) -> dict:
 
 
 def recommend(combos: list, prefix: str) -> list:
-    """Three picks for one category: best quality, lowest latency (quality >= 6), most
-    balanced. Chosen among recommended combinations; when there are none, among all of
+    """Three picks for one category: best quality, lowest latency (among quality >= 6
+    when any, else all), most balanced. Chosen among recommended combinations; when there are none, among all of
     them with a warning. One combination winning twice is shown once with both labels."""
     scored = [c for c in combos if c.get("composite") is not None]
     pool = [c for c in scored if c.get("recommended")]

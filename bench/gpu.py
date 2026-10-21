@@ -20,10 +20,6 @@ class VramReader:
         stats = self._gpu.read()
         return None if stats is None else float(stats.used_mb)
 
-    def total_mb(self):
-        stats = self._gpu.read()
-        return None if stats is None else float(stats.total_mb)
-
 
 class VramSampler:
     """Background sampling of used VRAM; peak_mb is None when NVML is unavailable."""

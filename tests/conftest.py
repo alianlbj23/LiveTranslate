@@ -53,12 +53,13 @@ _REAL_SELECTED_DIGEST = _digest(_REAL_SELECTED)
 _local_models.SELECTED_MODEL_FILE = _SANDBOX_DIR / "selected_model.txt"
 
 # The benchmark (bench/) reads and, when applying a recommendation, writes the same two
-# files; its clips / results folders go to the sandbox too
+# files (selected_model.txt through local_models above); its clips / results folders go
+# to the sandbox too, even when the shell already points LIVETRANSLATE_BENCH_DIR at the
+# real ones
 import bench.paths as _bench_paths  # noqa: E402
 
 _bench_paths.SETTINGS_FILE = _SANDBOX_DIR / "user_settings.json"
-_bench_paths.SELECTED_MODEL_FILE = _SANDBOX_DIR / "selected_model.txt"
-os.environ.setdefault("LIVETRANSLATE_BENCH_DIR", str(_SANDBOX_DIR / "bench"))
+os.environ["LIVETRANSLATE_BENCH_DIR"] = str(_SANDBOX_DIR / "bench")
 
 import pytest  # noqa: E402
 from bench import llm_servers as _llm_servers  # noqa: E402

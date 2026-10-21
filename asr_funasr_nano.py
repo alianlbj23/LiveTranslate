@@ -14,6 +14,7 @@ log = logging.getLogger("LiveTranslate.FunASR-Nano")
 # Add bundled code to path so model.py can resolve its imports (ctc, tools.utils)
 _NANO_DIR = os.path.join(os.path.dirname(__file__), "funasr_nano")
 
+
 class FunASRNanoEngine:
     """Speech-to-text using Fun-ASR-Nano-2512 or Fun-ASR-MLT-Nano-2512."""
 
@@ -122,7 +123,8 @@ class FunASRNanoEngine:
             return None
 
         # A forced language labels the result; main.py checks each sentence's script
-        # (one label for a whole interim buffer cannot be right for every sentence)
+        # (ja / ko / en only; skipped when the language had no prompt name), since one
+        # label for a whole interim buffer cannot be right for every sentence
         language = self.language or self._guess_language(text)
 
         log.debug(f"ASR: {text}")

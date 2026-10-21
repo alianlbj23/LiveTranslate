@@ -26,7 +26,6 @@ import hashlib
 import io
 import json
 import logging
-import os
 import random
 import re
 import threading
@@ -55,13 +54,14 @@ SKIP_CHECK_ROWS = 40
 CALL_TIMEOUT_S = 120.0  # one Hub request: revision, file list, footer
 GROUP_TIMEOUT_S = 600.0  # one row group (tens of MB in 1 MB range reads)
 
+# The keys double as the analysis categories (anime, vtuber); baseline is not ranked
 DATASETS = {
     "anime": {"hf_id": "joujiboi/japanese-anime-speech-v2", "split": "sfw", "n": 200,
-              "category": "anime", "label": "動畫（japanese-anime-speech-v2，sfw）"},
+              "label": "動畫（japanese-anime-speech-v2，sfw）"},
     "vtuber": {"hf_id": "japanese-asr/ja_asr.reazonspeech_test", "split": "test", "n": 200,
-               "category": "vtuber", "label": "VTuber 近似（ReazonSpeech 電視語音）"},
+               "label": "VTuber 近似（ReazonSpeech 電視語音）"},
     "baseline": {"hf_id": "japanese-asr/ja_asr.common_voice_8_0", "split": "test", "n": 100,
-                 "category": "baseline", "label": "基準（Common Voice 8.0）"},
+                 "label": "基準（Common Voice 8.0）"},
 }
 LIVE_EXTENSIONS = (".wav", ".flac", ".mp3", ".ogg")
 APPROX_TOTAL_MB = 550  # measured once; also in launcher/bench.ps1 and CLAUDE.md (update with PER_GROUP / n)
@@ -134,6 +134,11 @@ class Clip:
     wav: Path
     ref: str
     duration: float
+
+    @property
+    def key(self) -> str:
+        """The item key of this clip in result records ("<dataset>/<id>")."""
+        return f"{self.dataset}/{self.id}"
 
 
 # ---------------------------------------------------------------- Hub source
@@ -297,10 +302,10 @@ def load_audio_file(path) -> np.ndarray:
 
 
 def _atomic_write_json(path: Path, data):
-    tmp = path.with_name(path.name + ".tmp")
+    from bench.state import atomic_write_json
+
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, data)
     except OSError as e:
         raise DiskError(f"cannot write {path}: {e}") from e
 

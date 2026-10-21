@@ -125,9 +125,9 @@ def apply_notes(tl_entry: dict) -> list:
 
 
 def _atomic_write_json(path: Path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    from bench.state import atomic_write_json
+
+    atomic_write_json(path, data, indent=2)  # the app writes user_settings.json with indent 2
 
 
 def backups_dir() -> Path:
@@ -151,6 +151,13 @@ def backup(settings_path: Path, selected_file: Path, prefix: str = "") -> Path:
     return target
 
 
+def _target_paths(settings_path, selected_file) -> tuple[Path, Path]:
+    """The user's settings file and the launcher's model choice (defaults: the real ones)."""
+    import local_models
+
+    return Path(settings_path or paths.SETTINGS_FILE), Path(selected_file or local_models.SELECTED_MODEL_FILE)
+
+
 def apply_changes(changes: dict, tl_entry: dict, settings_path: Path | None = None,
                   selected_file: Path | None = None) -> Path:
     """Back up, then write only the changed keys. Refuses while LiveTranslate runs."""
@@ -158,8 +165,7 @@ def apply_changes(changes: dict, tl_entry: dict, settings_path: Path | None = No
 
     if find_running_app():
         raise SettingsError("LiveTranslate 正在執行。請先從系統匣按「結束」，它關閉時會存設定、蓋掉這次套用。")
-    settings_path = Path(settings_path or paths.SETTINGS_FILE)
-    selected_file = Path(selected_file or local_models.SELECTED_MODEL_FILE)
+    settings_path, selected_file = _target_paths(settings_path, selected_file)
     settings = load_settings(settings_path)
     saved = backup(settings_path, selected_file)
     for key, (_old, new) in changes.items():
@@ -196,12 +202,9 @@ def restore(backup_dir: Path, settings_path: Path | None = None, selected_file: 
             keep_current: bool = True):
     """Put a backup back. The current files are backed up first (keep_current, marked
     PRE_RESTORE) so a restore can be undone too; the result is read back and compared."""
-    import local_models
-
     if find_running_app():
         raise SettingsError("LiveTranslate 正在執行，請先關閉再還原。")
-    settings_path = Path(settings_path or paths.SETTINGS_FILE)
-    selected_file = Path(selected_file or local_models.SELECTED_MODEL_FILE)
+    settings_path, selected_file = _target_paths(settings_path, selected_file)
     try:
         data = json.loads((Path(backup_dir) / "user_settings.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:

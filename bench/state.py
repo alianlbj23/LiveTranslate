@@ -38,11 +38,13 @@ PLAN_DEFAULTS = {
 }
 
 
-def atomic_write_json(path: Path, data):
+def atomic_write_json(path: Path, data, indent: int = 1):
+    """Write to <name>.tmp, fsync, then replace: a crash leaves the old file or the new
+    one, never half of it. Raises OSError."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
+        json.dump(data, f, ensure_ascii=False, indent=indent)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)

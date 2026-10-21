@@ -2,13 +2,14 @@
 
 Stage 3: blind 1-10 scores on four criteria against the Japanese reference.
 Cross judging: a candidate is never scored by itself when another judge exists; judges
-are aligned with per-judge offsets computed on "anchor" items every judge scored (the
-calibration set and candidates scored by several judges).
+are aligned with per-judge offsets computed on "anchor" items scored by at least two
+judges (the calibration set and candidates scored by several judges).
 Stage 2: hallucinated / missed subtitle lines against a continuous transcript."""
 import json
 import logging
 import re
 from statistics import mean
+from typing import TypedDict
 
 log = logging.getLogger("LiveTranslate.Bench.Judge")
 
@@ -60,7 +61,15 @@ VAD_SYSTEM = (
 _JSON_RE = re.compile(r"\{.*?\}", re.S)
 
 
-def parse_scores(text: str):
+class Scores(TypedDict):
+    accuracy: int
+    naturalness: int
+    tone: int
+    taiwan: int
+    note: str
+
+
+def parse_scores(text: str) -> Scores | None:
     """First {...} with the four criteria as numbers 0..10 -> ints 1..10, or None. A
     value outside 0..10 (e.g. a 100-point scale) means the rubric was not followed."""
     for m in _JSON_RE.finditer(text or ""):
@@ -75,7 +84,7 @@ def parse_scores(text: str):
         except (KeyError, TypeError, ValueError):
             continue
         if any(not (0 <= v <= 10) for v in values.values()):
-            log.warning(f"Judge scores out of the 1-10 range: {values}")
+            log.warning(f"Judge scores outside 0-10 (rubric not followed): {values}")
             return None
         scores = {c: min(10, max(1, int(round(v)))) for c, v in values.items()}
         scores["note"] = str(data.get("note", ""))[:40]

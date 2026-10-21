@@ -392,7 +392,7 @@ class Bench:
                     session.transcribe(self._audio(clip.wav))
                 count = len(done)
                 for ds, clip in clips:
-                    key = f"{ds}/{clip.id}"
+                    key = clip.key
                     if key in done:
                         continue
                     base = {"task": task_id, "key": key, "asr": cand.id, "dataset": ds, "clip": clip.id,
@@ -586,7 +586,7 @@ class Bench:
     def _translate_task(self, m, entry, inputs, task_id, settle):
         done = self.store.final_keys("tl", task_id)
         todo = [(cat, clip, source) for cat, rows in inputs.items() for clip, source in rows
-                if f"{cat}/{clip.id}" not in done]
+                if clip.key not in done]
         total = sum(len(v) for v in inputs.values())
         errors = {}
         broken = None
@@ -604,7 +604,7 @@ class Bench:
             streak = 0
             ewma = Ewma()
             for cat, clip, source in todo:
-                key = f"{cat}/{clip.id}"
+                key = clip.key
                 if not source:
                     rec = {"ok": False, "text": "", "ttft_ms": None, "total_ms": None, "error": asr_runner.ASR_EMPTY}
                 else:
@@ -668,7 +668,7 @@ class Bench:
         label = f"{cand.label} + {m['name']}"
         done = self.store.final_keys("together", task_id)
         # a category is replayed as a whole (its records are written together at its end)
-        todo = {cat: [c for c in self._clips(cat)[1][:n_clips] if f"{cat}/{c.id}" not in done] for cat in cats}
+        todo = {cat: [c for c in self._clips(cat)[1][:n_clips] if c.key not in done] for cat in cats}
         todo = {cat: clips for cat, clips in todo.items() if clips}
         hint_missing = asr_runner.hint_missing_for(cand, self.forced)
         errors = {}
@@ -685,8 +685,8 @@ class Bench:
                     translator = self._translator(entry)
                     self._warm_up_together(session, translator, cats)
                 for cat, clips in todo.items():
-                    for rec in self._replay(session, translator, clips, hint_missing):
-                        key = f"{cat}/{rec['clip']}"
+                    for clip, rec in zip(clips, self._replay(session, translator, clips, hint_missing)):
+                        key = clip.key
                         if not rec["ok"] and rec["error"] != asr_runner.ASR_EMPTY:
                             errors[rec["error"]] = errors.get(rec["error"], 0) + 1
                             log.warning(f"Together {label} failed on {key}: {rec['error']} {rec.get('detail') or ''}")

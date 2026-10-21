@@ -23,7 +23,7 @@ def _run(store, deps):
     return RunStore(store.dir)
 
 
-# ---------------------------------------------------------------- C1 judge coverage
+# ---------------------------------------------------------------- judge coverage
 
 def test_quality_without_enough_judge_scores_is_not_reported(world):
     class OnlyAJudge(FakeJudge):
@@ -45,7 +45,7 @@ def test_quality_without_enough_judge_scores_is_not_reported(world):
     assert judge_task["status"] == "failed" and "judge cannot start" in judge_task["reason"]
 
 
-# ---------------------------------------------------------------- C2 / C3 VAD judging
+# ---------------------------------------------------------------- VAD judging
 
 @pytest.fixture
 def recording(world):
@@ -204,7 +204,7 @@ def test_vad_is_judged_by_the_first_judge_that_loads(world, recording):
     assert store.read("vad") and all(r["judged_windows"] > 0 for r in store.read("vad"))
 
 
-# ---------------------------------------------------------------- C4 worker leak
+# ---------------------------------------------------------------- worker leak
 
 def test_worker_error_does_not_leave_a_second_model_loaded(world):
     from asr_client import ASRWorkerError
@@ -316,7 +316,7 @@ def test_unrecoverable_worker_error_starts_a_fresh_worker(world):
     assert store.task("s1/sensevoice")["status"] == "done"
 
 
-# ---------------------------------------------------------------- C5 too few clips
+# ---------------------------------------------------------------- too few clips
 
 class _NoOllama:
     def __init__(self, root):
@@ -437,7 +437,7 @@ def test_reusing_stage1_requires_a_complete_matching_run(world, monkeypatch):
     assert plan is None and any("沒有完整的第 1 階段結果" in line for line in out)
 
 
-# ---------------------------------------------------------------- H1 fatal errors
+# ---------------------------------------------------------------- fatal errors
 
 def test_translator_that_cannot_be_built_fails_only_its_task(world):
     def factory(entry, s, c):
@@ -485,34 +485,112 @@ def test_ollama_errors_while_unloading_do_not_stop_the_run(world):
     assert store.state["status"] == "done"
 
 
-# ---------------------------------------------------------------- H4 retries
+# ---------------------------------------------------------------- retries
 
-def test_failed_sentences_are_retried_on_resume(world):
-    flaky = {"fail": True}
-
-    class Sometimes(FakeTranslator):
+def test_failed_sentences_of_an_interrupted_task_are_retried_on_resume(world):
+    """The way a user gets there: some sentences fail, the window is closed mid-task,
+    then "continue" runs the task again and redoes only what is not final."""
+    class FailsThenStops(FakeTranslator):
         def translate_iter(self, text, source_language="ja"):
-            if flaky["fail"] and self.calls >= 3:  # warm-up passes, real sentences fail
-                self.calls += 1
+            self.calls += 1
+            if self.calls in (4, 5):  # after the warm-up (3): two sentences fail
                 raise TimeoutError("slow")
-            yield from super().translate_iter(text, source_language)
+            if self.calls == 6:
+                raise KeyboardInterrupt  # the window is closed
+            yield f"{self.prefix}譯：{len(text)}字"
 
-    store = _run(RunStore.create(_plan(world, tl_models=_plan(world)["tl_models"][:1], judges=[FP["A Model"]])),
-                 _deps(world, translator=lambda e, s, c: Sometimes(e)))
-    assert all(not r["ok"] for r in store.read("tl"))
-    flaky["fail"] = False
-    for t in store.state["tasks"]:
-        if t["id"].startswith(("s3tl/", "s3judge/", "s3tog/")):
-            store.set_task(t["id"], status="pending")
-    store.state["status"] = "running"
-    store.save()
-    store = _run(store, _deps(world, translator=lambda e, s, c: Sometimes(e)))
+    store = RunStore.create(_one_model_plan(world))
+    with pytest.raises(KeyboardInterrupt):
+        Bench(store, SETTINGS, CONFIG, _deps(world, translator=lambda e, s, c: FailsThenStops(e))).run()
+    store = RunStore(store.dir)
+    assert store.state["status"] == "interrupted"
+    assert [r["ok"] for r in store.read("tl")] == [False, False]
+    _as_cmd_resume(store)
+    store = _run(store, _deps(world))
     latest = {(r["category"], r["clip"]): r for r in store.read("tl")}
-    assert latest and all(r["ok"] for r in latest.values())
+    assert len(latest) == 8 and all(r["ok"] for r in latest.values())
     assert analysis.quality_table(store)[(FP["A Model"], "anime")]["quality"] > 5
 
 
-# ---------------------------------------------------------------- H5 stage 1 meta
+def test_judge_items_that_failed_are_scored_again_on_resume(world):
+    class FirstAnswersFail(FakeJudge):
+        def __init__(self, entry):
+            super().__init__(entry)
+            self.calls = 0
+
+        def score(self, category, ja, tl):
+            self.calls += 1
+            return None if self.calls <= 3 else super().score(category, ja, tl)
+
+    deps = _deps(world)
+    deps.judge_factory = FirstAnswersFail
+    store = _run(RunStore.create(_plan(world)), deps)
+    assert sum(r["scores"] is None for r in store.read("judge")) == 2 * 3
+    _as_cmd_resume(store)
+    store = _run(store, _deps(world))
+    latest = analysis._latest(store.read("judge"), ("judge", "item"))
+    assert latest and all(r["scores"] for r in latest)
+    assert analysis.quality_table(store)[(FP["A Model"], "anime")]["note"] is None
+
+
+def test_translation_model_failing_in_a_row_is_stopped(world, monkeypatch):
+    from bench import orchestrator
+
+    monkeypatch.setattr(orchestrator, "FAIL_STREAK", 3)
+
+    class DiesLater(FakeTranslator):
+        def translate_iter(self, text, source_language="ja"):
+            if self.calls >= 5:  # warm-up (3) + 2 good sentences, then the server is gone
+                self.calls += 1
+                raise ConnectionError("refused")
+            yield from super().translate_iter(text, source_language)
+
+    store = _run(RunStore.create(_one_model_plan(world)), _deps(world, translator=lambda e, s, c: DiesLater(e)))
+    task = store.task(f"s3tl/{FP['A Model']}")
+    assert task["status"] == "failed" and "連續 3 句失敗" in task["reason"] and "refused" in task["reason"]
+    assert [r["ok"] for r in store.read("tl")] == [True, True, False, False, False]
+    assert {m["reason"] for m in store.read("together_meta")} == {"翻譯模型無法使用"}
+
+
+def test_judge_failing_every_calibration_item_is_stopped(world):
+    class NeverScores(FakeJudge):
+        def __init__(self, entry):
+            super().__init__(entry)
+            self.last_error = "BadRequestError: seed is not supported"
+
+        def score(self, category, ja, tl):
+            return None
+
+    deps = _deps(world)
+    deps.judge_factory = NeverScores
+    store = _run(RunStore.create(_plan(world)), deps)
+    for jfp in (FP["A Model"], FP["B Model"]):
+        task = store.task(f"s3judge/{jfp}")
+        assert task["status"] == "failed" and "校準題全部無法評分" in task["reason"]
+        assert "seed is not supported" in task["reason"]
+        assert sum(r["judge"] == jfp for r in store.read("judge")) == 6
+
+
+def test_rankings_stay_frozen_when_stage1_is_retried(world):
+    """Later stages used the first rankings; a retried stage-1 task updates the stage-1
+    table only, so the run stays consistent."""
+    class SenseVoiceFails(FakeASR):
+        def start(self):
+            if self.config.get("funasr_model") == "sensevoice-small":
+                raise RuntimeError("no GPU memory")
+
+    deps = _deps(world)
+    deps.asr_client_factory = lambda cfg: SenseVoiceFails(cfg, world["by_id"])
+    store = _run(RunStore.create(_plan(world, asr=["sensevoice", "mlt-nano", "anime-whisper"], stages=[1])), deps)
+    first = store.frozen("rankings")
+    assert "sensevoice" not in first["anime"]
+    store.set_task("s1/sensevoice", status="pending")
+    store = _run(store, _deps(world))
+    assert store.frozen("rankings") == first
+    assert analysis.asr_rankings(store)["anime"][0] == "sensevoice"
+
+
+# ---------------------------------------------------------------- stage 1 meta
 
 def test_later_stage_asr_failure_does_not_override_stage1(world):
     count = {"starts": 0}
@@ -534,7 +612,7 @@ def test_later_stage_asr_failure_does_not_override_stage1(world):
     assert analysis.asr_rankings(store)["anime"][0] == "sensevoice"
 
 
-# ---------------------------------------------------------------- H6 failures under load
+# ---------------------------------------------------------------- failures under load
 
 def test_failures_while_loaded_together_count_in_latency(world):
     class SlowTogether(FakeTranslator):
@@ -609,7 +687,7 @@ def test_pair_whose_warm_up_translations_all_fail_is_marked_failed(world):
     assert not store.read("together")
 
 
-# ---------------------------------------------------------------- H7 unfinished runs
+# ---------------------------------------------------------------- unfinished runs
 
 def test_report_lists_failed_items_and_marks_unfinished_runs(world):
     store = _run(RunStore.create(_plan(world)), _deps(world))
@@ -624,6 +702,31 @@ def test_report_lists_failed_items_and_marks_unfinished_runs(world):
     assert "評測沒有跑完" in html
     recs = json.loads((store.dir / "recommendations.json").read_text(encoding="utf-8"))
     assert recs["status"] == "interrupted"
+
+
+def test_recommendation_written_by_a_run_is_applied_as_written(world, monkeypatch, tmp_path):
+    """G7: recommendations.json from a real run read back by the apply menu (a renamed
+    field on either side used to pass every test)."""
+    import local_models
+
+    store = _run(RunStore.create(_plan(world)), _deps(world))
+    first = json.loads((store.dir / "recommendations.json").read_text(encoding="utf-8"))["items"][0]
+    settings_path = tmp_path / "user_settings.json"
+    settings_path.write_text(json.dumps({**SETTINGS, "asr_engine": "whisper", "vad_threshold": 0.45,
+                                         "active_model": 2}), encoding="utf-8")
+    monkeypatch.setattr(cli.settings_io.paths, "SETTINGS_FILE", settings_path)
+    monkeypatch.setattr(local_models, "SELECTED_MODEL_FILE", tmp_path / "selected_model.txt")
+    monkeypatch.setattr(settings_io, "find_running_app", lambda: [])
+    monkeypatch.setattr(cli, "is_cached", lambda cand, hub: True)
+    answers = iter(["", "", "y"])  # newest run, first recommendation, confirm
+    assert cli.cmd_apply(cli.Console(input_fn=lambda p: next(answers), print_fn=lambda s: None)) == 0
+    after = json.loads(settings_path.read_text(encoding="utf-8"))
+    from bench.asr_runner import CANDIDATES_BY_ID
+
+    assert {k: after[k] for k in CANDIDATES_BY_ID[first["asr"]].app_settings()} == \
+        CANDIDATES_BY_ID[first["asr"]].app_settings()
+    assert after["active_model"] == [m["name"] for m in MODELS].index(first["tl_name"])
+    assert after["vad_threshold"] == 0.45  # no recordings: not measured, kept
 
 
 def test_apply_from_an_unfinished_run_needs_confirmation(world, monkeypatch, tmp_path):
@@ -645,7 +748,7 @@ def test_apply_from_an_unfinished_run_needs_confirmation(world, monkeypatch, tmp
     assert json.loads(settings_path.read_text(encoding="utf-8"))["asr_engine"] == "whisper"
 
 
-# ---------------------------------------------------------------- H8 apply that would be undone
+# ---------------------------------------------------------------- apply that would be undone
 
 def test_apply_warns_that_the_launcher_keeps_its_local_model(tmp_path, monkeypatch):
     settings = {"models": [{"name": "Cloud", "model": "gpt-x", "api_base": "https://api.example.com/v1", "api_key": "k"},
@@ -658,6 +761,9 @@ def test_apply_warns_that_the_launcher_keeps_its_local_model(tmp_path, monkeypat
     assert notes and "啟動器" in notes[0]
     settings_io.apply_changes(changes, settings["models"][0], settings_path=path,
                               selected_file=tmp_path / "selected_model.txt")
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["active_model"] == 0 and after["asr_engine"] == "funasr"
+    assert not (tmp_path / "selected_model.txt").exists()  # a cloud model is not the launcher's choice
 
 
 def test_apply_rolls_back_when_the_launcher_selection_cannot_be_written(tmp_path, monkeypatch):
@@ -674,9 +780,9 @@ def test_apply_rolls_back_when_the_launcher_selection_cannot_be_written(tmp_path
     assert json.loads(path.read_text(encoding="utf-8")) == settings
 
 
-# ---------------------------------------------------------------- H9 failures mid-run
+# ---------------------------------------------------------------- failures mid-run
 
-def test_model_that_breaks_mid_run_is_stopped_and_reported(world):
+def test_model_that_breaks_mid_run_reports_its_errors(world):
     class DiesLater(FakeTranslator):
         def translate_iter(self, text, source_language="ja"):
             if self.calls >= 5:  # warm-up (3) + 2 good sentences, then the server is gone
@@ -714,10 +820,10 @@ def test_realtime_replay_measures_each_sentence_when_it_finishes(world):
     from bench.datasets import Clip
     from bench.orchestrator import Deps
 
-    class Session:
+    class Session:  # long enough to tell "from the audio's end" from "from the translation's start"
         def transcribe(self, audio):
-            time.sleep(0.01)
-            return {"text": "本当にそう思う", "language": "ja"}, 10.0
+            time.sleep(0.15)
+            return {"text": "本当にそう思う", "language": "ja"}, 150.0
 
     class Slow:
         def translate_iter(self, text, source_language="ja"):
@@ -734,4 +840,6 @@ def test_realtime_replay_measures_each_sentence_when_it_finishes(world):
     records = bench._replay(Session(), Slow(), clips, hint_missing=False)
     assert [r["ok"] for r in records] == [True, True, True]
     for r in records:
-        assert 0.09 <= r["e2e_ms"] / 1000 < 0.4, r["e2e_ms"]
+        # ASR 0.15 s + translation 0.1 s, counted from when the sentence was handed over;
+        # well below the whole replay (~1.4 s) even on a busy machine
+        assert 0.24 <= r["e2e_ms"] / 1000 < 0.9, r["e2e_ms"]
