@@ -49,6 +49,7 @@ from audio_capture import AudioCapture
 from vad_processor import VADProcessor
 from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
 from translator import Translator, RepetitionError
+import app_update_ui
 import local_models
 import local_model_prep
 import local_model_ui
@@ -2897,6 +2898,17 @@ def main():
 
     quit_action.triggered.connect(on_quit)
     menu.addAction(quit_action)
+
+    # Updates (was the launcher's console step): a quiet check after start, the rest on the
+    # home page's Maintenance card; "update and restart" quits like the Quit menu
+    updater = app_update_ui.UpdateController(
+        show_status=panel.set_update_status,
+        notify=lambda text: tray.showMessage("LiveTranslate", text, QSystemTrayIcon.MessageIcon.Information, 10000),
+        confirm=panel.confirm, quit_app=on_quit, parent=app,
+    )
+    panel.update_check_requested.connect(updater.check)
+    panel.update_apply_requested.connect(updater.apply)
+    QTimer.singleShot(15000, lambda: updater.check(quiet=True))
 
     # --- Connect overlay signals ---
     overlay.settings_requested.connect(on_toggle_panel)

@@ -191,6 +191,8 @@ class ControlPanel(FluentWindow):
     settings_changed = pyqtSignal(dict)
     model_changed = pyqtSignal(dict)
     local_model_requested = pyqtSignal(str)  # catalog model to use (downloaded first when needed)
+    update_check_requested = pyqtSignal()
+    update_apply_requested = pyqtSignal()
     models_list_changed = pyqtSignal(list, int)
     subtitle_settings_changed = pyqtSignal(dict)
     _bench_result = pyqtSignal(str)
@@ -395,6 +397,19 @@ class ControlPanel(FluentWindow):
         maint.addSettingCard(_WidgetCard(
             FIF.DEVELOPER_TOOLS, t("label_env_check"), self._env_check_btn, content=t("desc_env_check"),
         ))
+        update_box = QWidget()
+        update_row = QHBoxLayout(update_box)
+        update_row.setContentsMargins(0, 0, 0, 0)
+        update_row.setSpacing(8)
+        self._update_check_btn = PushButton(t("btn_update_check"))
+        self._update_check_btn.clicked.connect(self.update_check_requested.emit)
+        update_row.addWidget(self._update_check_btn)
+        self._update_apply_btn = PrimaryPushButton(t("btn_update_apply"))
+        self._update_apply_btn.clicked.connect(self.update_apply_requested.emit)
+        self._update_apply_btn.setVisible(False)
+        update_row.addWidget(self._update_apply_btn)
+        self._update_card = _WidgetCard(FIF.SYNC, t("label_update"), update_box, content=t("update_not_checked"))
+        maint.addSettingCard(self._update_card)
         self._factory_reset_btn = PushButton(t("btn_factory_reset"))
         self._factory_reset_btn.clicked.connect(self._on_factory_reset_clicked)
         maint.addSettingCard(_WidgetCard(
@@ -403,6 +418,15 @@ class ControlPanel(FluentWindow):
         page.add_group(maint)
         page.finish()
         return page
+
+    def set_update_status(self, text: str, can_update: bool, busy: bool):
+        self._update_card.setContent(text)
+        self._update_apply_btn.setVisible(can_update)
+        self._update_apply_btn.setEnabled(not busy)
+        self._update_check_btn.setEnabled(not busy)
+
+    def confirm(self, title: str, text: str) -> bool:
+        return bool(MessageBox(title, text, self).exec())
 
     def _on_env_check_clicked(self):
         from env_check_ui import EnvCheckDialog
