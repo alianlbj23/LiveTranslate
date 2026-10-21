@@ -1,5 +1,6 @@
 """Settings → Home → Maintenance → Check environment (env_check.py / env_check_ui.py), which
 replaced the launcher's console check. Processes, Ollama and HTTP are faked."""
+import gc
 import json
 import os
 import subprocess
@@ -20,6 +21,17 @@ import ollama_server  # noqa: E402
 _REAL_CLIENT = httpx.Client
 LOCAL = {"name": "Qwen3.5 9B", "api_base": "http://127.0.0.1:11434/v1", "api_key": "ollama", "model": "qwen3.5:9b"}
 
+
+
+@pytest.fixture(autouse=True)
+def _collect_widgets_now():
+    """Parentless Fluent widgets (dialogs, groups) left in reference cycles are otherwise
+    collected at some later allocation. When that happens while qfluentwidgets' setTheme()
+    walks its style-sheet registry (every ControlPanel calls it), the widget's `destroyed` →
+    deregister changes that dict mid-iteration: "dictionary changed size during iteration"
+    in an unrelated test. Collect them at the end of each test instead."""
+    yield
+    gc.collect()
 
 @pytest.fixture(autouse=True)
 def _zh_tw():

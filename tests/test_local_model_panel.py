@@ -1,5 +1,6 @@
 """Settings → Translation → 本機翻譯模型 (local_model_panel.py): the catalog with download
 state and graphics card advice, replacing the launcher's model list."""
+import gc
 import os
 import sys
 import time
@@ -17,6 +18,17 @@ import ollama_server  # noqa: E402
 
 SAKURA = "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"
 
+
+
+@pytest.fixture(autouse=True)
+def _collect_widgets_now():
+    """Parentless Fluent widgets (dialogs, groups) left in reference cycles are otherwise
+    collected at some later allocation. When that happens while qfluentwidgets' setTheme()
+    walks its style-sheet registry (every ControlPanel calls it), the widget's `destroyed` →
+    deregister changes that dict mid-iteration: "dictionary changed size during iteration"
+    in an unrelated test. Collect them at the end of each test instead."""
+    yield
+    gc.collect()
 
 @pytest.fixture(autouse=True)
 def _zh_tw():
@@ -186,15 +198,15 @@ def test_settings_button_downloads_without_asking_again(qapp):
 
     asked, seen = [], {}
 
-    def prepare_fn(settings, entry, log_dir, *, ask_download, on_progress, cancelled, free_gb_at_start):
+    def prepare_fn(settings, entry, log_dir, *, ask_download, on_progress, cancelled, free_gb_at_start, asr_loaded):
         seen["answer"] = ask_download("m", "M", 1.0)
-        return prep.PrepResult(port=11434)
+        return prep.PrepResult(port=11434, model="m", installed={"m"})
     finished = []
     s = local_model_ui.LocalModelStarter(apply_settings=lambda x: None, warm=lambda e: None,
-                                         notify=lambda *a: None, log_dir=Path("logs"),
+                                         notify=lambda *a: None, log_dir=Path("logs"), get_settings=dict,
                                          prepare=prepare_fn, ask=lambda label, size: asked.append(label) or False)
     s.finished.connect(finished.append)
-    s.start({}, {"model": "m"}, confirmed=True)
+    s.start({}, {"model": "m"}, user_request=True)
     _wait(qapp, lambda: finished)
     assert seen == {"answer": True} and asked == []
 
@@ -202,5 +214,5 @@ def test_settings_button_downloads_without_asking_again(qapp):
 def test_main_switches_through_the_starter():
     src = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "panel.local_model_requested.connect(_use_local_model)" in src
-    assert "confirmed=True" in src and "panel.notify_local_model_busy()" in src
+    assert "user_request=True" in src and "panel.notify_local_model_busy()" in src
     assert "local_starter.finished.connect(" in src

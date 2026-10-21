@@ -58,10 +58,25 @@ def load_catalog(path=None) -> dict:
     return {"default": default, "models": models}
 
 
+_THIS_COMPUTER = ("127.0.0.1", "localhost", "::1")
+
+
+def _host(api_base: str) -> str:
+    netloc = api_base.split("//", 1)[-1].split("/", 1)[0].lower()
+    if netloc.startswith("["):  # [::1]:11434
+        return netloc[1:].split("]", 1)[0]
+    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+
+
 def is_local_ollama(entry) -> bool:
+    """An Ollama entry on this computer (the app starts, downloads into and re-points only
+    these). An Ollama on another computer also uses the api_key "ollama", so the host counts."""
     if not isinstance(entry, dict):
         return False
-    return entry.get("api_key") == "ollama" or ":1143" in str(entry.get("api_base", ""))
+    base = str(entry.get("api_base", ""))
+    if _host(base) not in _THIS_COMPUTER:
+        return False
+    return entry.get("api_key") == "ollama" or ":1143" in base
 
 
 def _new_entry(c: dict, api_base: str) -> dict:

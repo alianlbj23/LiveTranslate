@@ -1,6 +1,7 @@
 """Update check / update (app_update.py + launcher/update_window.ps1), which replaced the
 launcher's console update step. git and processes are faked; the update window runs for
 real with stand-in programs for python.exe / pythonw.exe."""
+import gc
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,17 @@ import app_update as au
 ROOT = Path(__file__).resolve().parents[1]
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows update window")
 
+
+
+@pytest.fixture(autouse=True)
+def _collect_widgets_now():
+    """Parentless Fluent widgets (dialogs, groups) left in reference cycles are otherwise
+    collected at some later allocation. When that happens while qfluentwidgets' setTheme()
+    walks its style-sheet registry (every ControlPanel calls it), the widget's `destroyed` →
+    deregister changes that dict mid-iteration: "dictionary changed size during iteration"
+    in an unrelated test. Collect them at the end of each test instead."""
+    yield
+    gc.collect()
 
 def _done(out="", code=0, err=""):
     return subprocess.CompletedProcess([], code, stdout=out, stderr=err)
@@ -312,3 +324,25 @@ def test_main_checks_quietly_after_start():
     src = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "QTimer.singleShot(15000, lambda: updater.check(quiet=True))" in src
     assert "quit_app=on_quit" in src and "panel.update_apply_requested.connect(updater.apply)" in src
+
+
+def test_update_window_cleans_up_when_closed_mid_step():
+    """Review: closing the window with X left pip changing the venv."""
+    src = (ROOT / "launcher" / "update_window.ps1").read_text(encoding="utf-8-sig")
+    closing = src[src.index("$form.Add_FormClosing("):src.index("# ---------- work")]
+    assert "Stop-StepTree" in closing and "$e.Cancel = $true" in closing  # asks first, then ends the tree
+    tree = src[src.index("function Stop-StepTree"):src.index("$btnStart.Add_Click(")]
+    assert "taskkill.exe" in tree and '"/T"' in tree
+
+
+def test_update_window_pip_steps_have_a_time_limit_and_stay_off_the_system_drive():
+    src = (ROOT / "launcher" / "update_window.ps1").read_text(encoding="utf-8-sig")
+    assert "$StepTimeoutMinutes" in src and "StepStarted" in src
+    assert 'EnvironmentVariables["PIP_CACHE_DIR"]' in src and 'EnvironmentVariables["TMP"]' in src
+    assert "Remove-Item -Recurse -Force -LiteralPath $PipCache, $PipTemp" in src
+
+
+def test_no_second_livetranslate_while_the_first_is_still_closing():
+    src = (ROOT / "launcher" / "update_window.ps1").read_text(encoding="utf-8-sig")
+    wait = src[src.index('"wait" {'):src.index('"steps" {')]
+    assert "Set-Failed" in wait and "-NoStart" in wait

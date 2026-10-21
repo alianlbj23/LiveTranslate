@@ -17,11 +17,15 @@ $LogDir  = Join-Path $Root "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $script:LogFile = Join-Path $LogDir ("update_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
 $WaitSeconds = 120
+$StepTimeoutMinutes = 60          # a pip step that hangs longer than this is ended
+# pip cache and temp files inside the app folder (not the system drive), deleted afterwards
+$PipCache = Join-Path $Root ".pip-cache"
+$PipTemp  = Join-Path $Root ".tmp"
 
 $Steps = @(
-    @{ Title = "更新套件（requirements.txt）"; Args = @("-m", "pip", "install", "-r", "requirements.txt", "--progress-bar", "off") },
-    @{ Title = "更新斷句套件（yasbd-lib）"; Args = @("-m", "pip", "install", "yasbd-lib>=0.15,<1.0", "--progress-bar", "off") },
-    @{ Title = "檢查套件相依性"; Args = @("-m", "pip", "check") }
+    @{ Title = "更新套件（requirements.txt）"; Arguments = @("-m", "pip", "install", "-r", "requirements.txt", "--progress-bar", "off") },
+    @{ Title = "更新斷句套件（yasbd-lib）"; Arguments = @("-m", "pip", "install", "yasbd-lib>=0.15,<1.0", "--progress-bar", "off") },
+    @{ Title = "檢查套件相依性"; Arguments = @("-m", "pip", "check") }
 )
 
 # ---------- window ----------
@@ -74,13 +78,14 @@ function Add-Line {
 }
 
 function Set-Failed {
-    param([string]$Text)
+    # -NoStart: LiveTranslate may still be running, so no "start anyway" (two copies would run)
+    param([string]$Text, [switch]$NoStart)
     $script:State = "failed"
     $label.ForeColor = [System.Drawing.Color]::Firebrick
     $label.Text = "$Text`r`n詳細內容在下方。"
     Add-Line "[失敗] $Text"
     Add-Line "記錄檔：$script:LogFile"
-    $btnStart.Visible = (Test-Path -LiteralPath $PythonW)
+    $btnStart.Visible = (-not $NoStart) -and (Test-Path -LiteralPath $PythonW)
     $btnClose.Enabled = $true
 }
 
@@ -94,9 +99,10 @@ function Start-Step {
     param($Step)
     $label.Text = $Step.Title + "（可能需要幾分鐘）…"
     Add-Line ("> " + $Step.Title)
+    New-Item -ItemType Directory -Force -Path $PipCache, $PipTemp | Out-Null
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Python
-    $psi.Arguments = ($Step.Args | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join " "
+    $psi.Arguments = ($Step.Arguments | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join " "
     $psi.WorkingDirectory = $Root
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -105,13 +111,17 @@ function Start-Step {
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
+    $psi.EnvironmentVariables["PIP_CACHE_DIR"] = $PipCache
+    $psi.EnvironmentVariables["TMP"] = $PipTemp
+    $psi.EnvironmentVariables["TEMP"] = $PipTemp
     $script:Proc = [System.Diagnostics.Process]::Start($psi)
+    $script:StepStarted = Get-Date
     $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync()
     $script:ErrTask = $script:Proc.StandardError.ReadLineAsync()
 }
 
-function Read-Output {
-    # Show the lines that arrived; $true while the step is still running
+function Update-StepOutput {
+    # Show the lines that arrived; returns $true while the step is still running
     while ($script:OutTask -and $script:OutTask.IsCompleted) {
         $line = $script:OutTask.Result
         if ($null -eq $line) { $script:OutTask = $null } else { Add-Line $line; $script:OutTask = $script:Proc.StandardOutput.ReadLineAsync() }
@@ -123,9 +133,31 @@ function Read-Output {
     return -not ($script:Proc.HasExited -and -not $script:OutTask -and -not $script:ErrTask)
 }
 
+function Stop-StepTree {
+    # pip may run other programs below it: end the whole tree
+    if (-not $script:Proc -or $script:Proc.HasExited) { return }
+    try {
+        $k = Start-Process -FilePath "taskkill.exe" -ArgumentList "/T", "/F", "/PID", $script:Proc.Id -WindowStyle Hidden -PassThru
+        if (-not $k.WaitForExit(10000)) { Add-Line "taskkill 沒有在 10 秒內結束" }
+    } catch {
+        Add-Line "無法結束安裝套件的程式：$($_.Exception.Message)"
+    }
+}
+
 $btnStart.Add_Click({
     $btnStart.Enabled = $false
     try { Start-LiveTranslate } catch { Add-Line "無法啟動：$($_.Exception.Message)" }
+})
+
+$form.Add_FormClosing({
+    param($source, $e)
+    if ($script:State -ne "steps" -or -not $script:Proc -or $script:Proc.HasExited) { return }
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        "套件還在更新，要中止嗎？中止後下次開啟 LiveTranslate 會重新安裝缺少的套件。", "LiveTranslate 更新",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { $e.Cancel = $true; return }
+    Stop-StepTree
 })
 
 # ---------- work, one step per timer tick so the window stays responsive ----------
@@ -144,7 +176,7 @@ $timer.Add_Tick({
                 $alive = ($ParentPid -gt 0) -and [bool](Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)
                 if ($alive) {
                     if (((Get-Date) - $script:WaitStart).TotalSeconds -gt $WaitSeconds) {
-                        Set-Failed "LiveTranslate 在 $WaitSeconds 秒內沒有關閉，沒有更新套件。"
+                        Set-Failed "LiveTranslate 在 $WaitSeconds 秒內沒有關閉，沒有更新套件。請先關閉它再重新更新。" -NoStart
                     }
                     return
                 }
@@ -158,13 +190,21 @@ $timer.Add_Tick({
                 }
             }
             "steps" {
-                if (Read-Output) { return }
+                if (Update-StepOutput) {
+                    if (((Get-Date) - $script:StepStarted).TotalMinutes -gt $StepTimeoutMinutes) {
+                        Stop-StepTree
+                        Set-Failed ("{0}超過 {1} 分鐘沒有完成，已中止。" -f $Steps[$script:StepIndex].Title, $StepTimeoutMinutes)
+                    }
+                    return
+                }
                 $code = $script:Proc.ExitCode
                 $script:Proc.Dispose()
+                $script:Proc = $null
                 if ($code -ne 0) { Set-Failed ("{0}失敗（結束代碼 {1}）。" -f $Steps[$script:StepIndex].Title, $code); return }
                 $script:StepIndex++
                 if ($script:StepIndex -lt $Steps.Count) { Start-Step $Steps[$script:StepIndex]; return }
                 Set-Content -LiteralPath $Ready -Value (Get-Date -Format o) -Encoding ascii
+                Remove-Item -Recurse -Force -LiteralPath $PipCache, $PipTemp -ErrorAction SilentlyContinue
                 Add-Line "套件已更新。"
                 $script:State = "launch"
             }

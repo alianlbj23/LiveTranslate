@@ -1,7 +1,8 @@
 ﻿# LiveTranslate - release builder
-# Produces a zip whose only entry is LiveTranslate.exe: the first launch installs everything in
-# a window (launcher\setup.ps1, run hidden: Python, Git, Ollama, packages, speech model, defaults
-# for the graphics card); later launches start LiveTranslate without any console window.
+# Produces a zip of the committed source whose only double-click entry is LiveTranslate.exe: the
+# first launch installs everything in a window (launcher\setup.ps1, run hidden: Python, Git,
+# Ollama, packages, speech model, defaults for the graphics card); later launches start
+# LiveTranslate without any console window.
 
 param([string]$Version = "")
 
@@ -48,7 +49,8 @@ Write-Ok "Source exported"
 
 # ── 3. LiveTranslate.exe (Windows' own C# compiler) ──
 Write-Step "Building LiveTranslate.exe..."
-& (Join-Path $ProjectDir "launcher\build_exe.ps1") -Out (Join-Path $Stage "LiveTranslate.exe")
+# from the exported copy, so the exe matches the zipped source even with uncommitted changes here
+& (Join-Path $Stage "launcher\build_exe.ps1") -Out (Join-Path $Stage "LiveTranslate.exe")
 if ($LASTEXITCODE -ne 0) { throw "LiveTranslate.exe build failed" }
 Write-Ok "LiveTranslate.exe"
 

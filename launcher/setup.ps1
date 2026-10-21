@@ -12,6 +12,15 @@ param(
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Continue"   # 用 $LASTEXITCODE 逐步檢查，pip/winget 的 stderr 不會變成例外
 
+# 同時只能有一個安裝在改同一個 .venv（安裝視窗與除錯入口，或開了兩次 LiveTranslate.exe）
+$SetupMutex = New-Object System.Threading.Mutex($false, "Global\LiveTranslate-Setup")
+$SetupOwned = $false
+try { $SetupOwned = $SetupMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $SetupOwned = $true }
+if (-not $SetupOwned) {
+    Write-Host "  [錯誤] 另一個安裝正在進行中，請等它完成（或關掉它）後再試。" -ForegroundColor Red
+    exit 1
+}
+
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 $LogDir = Join-Path $Root "logs"
@@ -41,8 +50,10 @@ function Find-Python {
     foreach ($v in "3.12", "3.11", "3.10") {
         try {
             $exe = & py "-$v" -c "import sys; print(sys.executable)" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $exe -and (Test-Path $exe.Trim())) { return $exe.Trim() }
-        } catch {}
+            if ($LASTEXITCODE -eq 0 -and $exe -and (Test-Path -LiteralPath $exe.Trim())) { return $exe.Trim() }
+        } catch {
+            Write-Host "  （找不到 Python $v：$($_.Exception.Message)）" -ForegroundColor DarkGray
+        }
     }
     return $null
 }
@@ -71,8 +82,8 @@ if (-not $Yes) {
 
 # ---------- 0. 事前檢查 ----------
 Write-Step "檢查環境..."
-if ($Root -match '[^\x00-\x7F]' -or $Root -match ' ') {
-    Fail "安裝路徑不能有中文或空格：$Root`n  請把整個資料夾移到例如 D:\LiveTranslate 後再執行。"
+if ($Root -match '[^\x00-\x7F]' -or $Root -match ' ' -or $Root -match '[\[\]]') {
+    Fail "安裝路徑不能有中文、空格或方括號：$Root`n  請把整個資料夾移到例如 D:\LiveTranslate 後再執行。"
 }
 $drive = Get-PSDrive -Name $Root.Substring(0, 1) -ErrorAction SilentlyContinue
 if ($drive -and $drive.Free -lt 20GB) { Fail ("磁碟空間不足：{0} 槽只剩 {1:N1} GB，需要約 20 GB。" -f $drive.Name, ($drive.Free / 1GB)) }
@@ -86,12 +97,17 @@ if (-not (Test-Cmd nvidia-smi)) {
 }
 $smi = (& nvidia-smi 2>$null) -join "`n"
 $cudaVer = 0.0
-if ($smi -match 'CUDA Version:\s*([0-9]+\.[0-9]+)') { $cudaVer = [double]$Matches[1] }
+# 驅動 610 起寫成「CUDA UMD Version: 13.3」，舊版是「CUDA Version: 12.8」
+if ($smi -match 'CUDA (?:UMD )?Version:\s*([0-9]+\.[0-9]+)') { $cudaVer = [double]$Matches[1] }
 $cc = 0.0
-try { $cc = [double]((& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1).Trim()) } catch {}
+try { $cc = [double]((& nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1).Trim()) } catch {
+    Write-Warn "讀不到顯示卡的 compute capability：$($_.Exception.Message)"
+}
 $gpuName = ((& nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1) -as [string]).Trim()
 $vramMB = 0
-try { $vramMB = [int]((& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1).Trim()) } catch {}
+try { $vramMB = [int]((& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1).Trim()) } catch {
+    Write-Warn "讀不到顯示記憶體大小（會用最保守的預設模型）：$($_.Exception.Message)"
+}
 Write-Ok "顯示卡：$gpuName（compute capability $cc，驅動支援 CUDA $cudaVer，VRAM $vramMB MB）"
 if ($cc -ge 12.0) { $CudaIndex = "cu128" } else { $CudaIndex = "cu126" }
 if ($cc -ge 12.0 -and $cudaVer -lt 12.8) { Fail "RTX 50 系列需要支援 CUDA 12.8 以上的驅動，目前是 $cudaVer，請更新 NVIDIA 驅動。" }
@@ -129,6 +145,7 @@ if (-not (Test-Path $VenvPy)) {
 }
 # pip 快取與暫存放在專案內，裝完刪掉（不塞爆系統碟）
 $env:PIP_CACHE_DIR = Join-Path $Root ".pip-cache"
+$OldTmp, $OldTemp = $env:TMP, $env:TEMP
 $env:TMP  = Join-Path $Root ".tmp"
 $env:TEMP = $env:TMP
 New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
@@ -186,8 +203,10 @@ if ("$cudaOk".Trim() -eq "True" -and [int]("$ct2Ok".Trim()) -ge 1) {
 } else {
     Write-Warn "GPU 檢查未通過（torch=$cudaOk, ctranslate2=$ct2Ok），程式仍可執行但會很慢。請確認驅動版本。"
 }
-Set-Content -LiteralPath $Ready -Value (Get-Date -Format o) -Encoding ascii
 Remove-Item -Recurse -Force $env:PIP_CACHE_DIR, $env:TMP -ErrorAction SilentlyContinue
+# the folder is gone: later steps use the normal temp folder again
+$env:TMP = $OldTmp
+$env:TEMP = $OldTemp
 
 # ---------- 4. 語音模型與預設設定 ----------
 $choice = $null
@@ -234,6 +253,9 @@ if (-not $SkipModels -and -not (Test-Path -LiteralPath (Join-Path $Root "LiveTra
     & (Join-Path $PSScriptRoot "build_exe.ps1")
     if ($LASTEXITCODE -ne 0) { Write-Warn "LiveTranslate.exe 產生失敗；仍可用 LiveTranslate（除錯）.bat 啟動。" }
 }
+
+# 就緒標記最後才寫：語音模型或設定失敗的重新安裝，下次開啟會再跑一次安裝
+Set-Content -LiteralPath $Ready -Value (Get-Date -Format o) -Encoding ascii
 
 $next = "第一次開啟時會詢問並下載翻譯模型（只需一次）"
 if ($choice) { $next = "第一次開啟時會詢問並下載翻譯模型 {0}（約 {1:0.0} GB，只需一次）" -f $choice.label, [double]$choice.size_gb }

@@ -1,7 +1,7 @@
 """Local Ollama for the translation models (no Qt): start it with the fast settings, pick the
 port, download models with progress and release the GPU.
 
-Used by main.py (start / quit), the control panel (model downloads) and bench/
+Used by main.py (quit), local_model_prep (start / downloads), the settings and bench/
 (bench/llm_servers re-exports it). The port rules are the ones the old console
 launcher used: 11434, or 11435 when another Ollama (usually the
 one inside WSL) holds 11434 without the model; a tray Ollama without the fast settings is
@@ -86,7 +86,10 @@ class Ollama:
         as "no models")."""
         resp = self._http.get(f"{self.root}{path}", timeout=5.0)
         resp.raise_for_status()
-        return [m for m in resp.json().get("models", []) if isinstance(m, dict) and m.get("name")]
+        data = resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("models", []), list):
+            raise ValueError(f"unexpected answer from {self.root}{path}: {str(data)[:120]}")
+        return [m for m in data.get("models", []) if isinstance(m, dict) and m.get("name")]
 
     def installed(self) -> set:
         return {m["name"] for m in self._models("/api/tags")}
@@ -254,11 +257,18 @@ def stop_tray_ollama():
 
 
 def stop_ollama(pid: int):
+    """End our `ollama serve` and its runner processes (a runner left behind would keep the
+    model in graphics memory)."""
     import psutil
 
     try:
         p = psutil.Process(pid)
         if p.name().lower().startswith("ollama"):
+            for child in p.children(recursive=True):
+                try:
+                    child.kill()
+                except psutil.Error as e:
+                    log.warning(f"Could not stop Ollama runner {child.pid}: {e}")
             p.kill()
     except psutil.Error as e:
         log.info(f"Ollama pid {pid} already gone: {e}")
@@ -319,17 +329,22 @@ def ensure_server(model: str, log_dir: Path, say=None) -> int:
     return ALT_PORT
 
 
-def release(port: int | None = None, timeout: float = 15.0):
-    """Unload the models of the Ollama we started and stop it (an Ollama someone else
-    started keeps running, only its models are unloaded). Safe to call more than once."""
+def release_ours(timeout: float = 15.0) -> bool:
+    """Unload every model of the Ollama this app started (whatever model is active now),
+    then stop it with its runners. False when we did not start one (an Ollama someone else
+    started is left alone). Safe to call more than once."""
     import httpx
 
     pid = pid_file_server()
-    if port is not None:
+    if not pid:
+        return False
+    for port in (DEFAULT_PORT, ALT_PORT):
+        if port_owner(port)[1] != pid:
+            continue
         try:
             Ollama(root_url(port)).unload_all(timeout=timeout)
         except (httpx.HTTPError, ValueError) as e:
             log.warning(f"Could not unload the models on port {port}: {e}")
-    if pid:
-        stop_ollama(pid)
-        log.info("Ollama stopped (it is started again on the next launch)")
+    stop_ollama(pid)
+    log.info("Ollama stopped (it is started again on the next launch)")
+    return True

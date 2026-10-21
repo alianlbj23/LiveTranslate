@@ -1,5 +1,6 @@
 """The best-combination benchmark window (bench/window.py, bench/gui_protocol.py) that
 replaced launcher/bench.ps1's console menu, and how the app opens it."""
+import gc
 import io
 import json
 import os
@@ -16,6 +17,17 @@ sys.path.insert(0, str(ROOT))
 
 from bench.gui_protocol import JsonConsole, ProgressStream  # noqa: E402
 
+
+
+@pytest.fixture(autouse=True)
+def _collect_widgets_now():
+    """Parentless Fluent widgets (dialogs, groups) left in reference cycles are otherwise
+    collected at some later allocation. When that happens while qfluentwidgets' setTheme()
+    walks its style-sheet registry (every ControlPanel calls it), the widget's `destroyed` →
+    deregister changes that dict mid-iteration: "dictionary changed size during iteration"
+    in an unrelated test. Collect them at the end of each test instead."""
+    yield
+    gc.collect()
 
 def _console(*answers):
     out = io.StringIO()
@@ -280,3 +292,40 @@ def test_settings_open_the_benchmark_and_quit():
     bench = src[src.index("    def _open_bench():"):src.index("    panel.bench_requested.connect(_open_bench)")]
     assert bench.index("app_launch.open_bench_window()") < bench.index("on_quit()")
     assert 't("label_bench")' in (ROOT / "control_panel.py").read_text(encoding="utf-8")
+
+
+def test_json_that_is_not_an_object_is_shown_as_text(qapp):
+    """Review: a line like `1` or `null` raised in the slot and aborted the window."""
+    w, spawned, _p, _k = _window(qapp, {"download": ([1, None, "x", {"t": "say", "lines": ["ok"]}], 0)})
+    w.run("download")
+    _wait(qapp, lambda: spawned[-1:] == ["status"] and w.proc is None)
+    text = w.output.toPlainText()
+    assert "1" in text and "null" in text and "ok" in text
+
+
+def test_stopping_is_not_reported_as_an_error(qapp):
+    from bench.window import BenchWindow
+
+    killed = []
+    w = BenchWindow(spawn=lambda c: FakeProc([{"t": "say", "lines": ["x"]}]),  # the status refresh afterwards
+                    dialogs=FakeDialogs(confirm=True), kill=killed.append)
+    w.proc, w._command = type("P", (), {"stdin": io.StringIO(), "pid": 1})(), "start"
+    assert w.stop()
+    w._on_finished(1)  # TerminateProcess exit code
+    _wait(qapp, lambda: w.proc is None)
+    assert "結束代碼" not in w.output.toPlainText() and "已停止" in w.output.toPlainText()
+
+
+def test_window_stays_when_livetranslate_cannot_start(qapp):
+    from bench.window import BenchWindow
+
+    w = BenchWindow(spawn=lambda c: None, dialogs=FakeDialogs(), start_app=lambda: False)
+    closed = []
+    w.close = lambda: closed.append(True)
+    w._open_app()
+    assert closed == [] and "無法開啟 LiveTranslate" in w.output.toPlainText()
+
+
+def test_window_start_failures_are_logged_and_shown():
+    src = (ROOT / "launcher" / "bench_window.py").read_text(encoding="utf-8")
+    assert "except Exception" in src and "logging" in src and "MessageBox" in src

@@ -52,6 +52,7 @@ from translator import Translator, RepetitionError
 import app_launch
 import app_update_ui
 import local_models
+import local_model_panel
 import local_model_prep
 import local_model_ui
 import ollama_server
@@ -1946,10 +1947,9 @@ class LiveTranslateApp:
             return
         self._gpu_released = True
         self._unload_local_models()
-        pid = ollama_server.pid_file_server()
-        if pid:  # also after switching to a cloud model during the session
-            ollama_server.stop_ollama(pid)
-            log.info("Ollama stopped (it is started again on the next launch)")
+        # The Ollama this session started: every model unloaded first (also after switching to
+        # a cloud model), then the serve and its runners stopped
+        ollama_server.release_ours()
 
     def _unload_local_models(self):
         try:
@@ -1966,14 +1966,18 @@ class LiveTranslateApp:
             with httpx.Client(trust_env=False, timeout=5.0) as client:
                 try:
                     loaded = client.get(f"{base}/api/ps").json().get("models") or []
-                except Exception:
+                except Exception as e:  # unload at least the active model
+                    log.warning(f"Could not list the models Ollama holds ({e}); unloading the active one")
                     loaded = [{"name": model.get("model", "")}]
                 for m in loaded:
                     name = m.get("name") or m.get("model")
                     if not name:
                         continue
-                    client.post(f"{base}/api/generate", json={"model": name, "keep_alive": 0})
-                    log.info(f"Ollama model unloaded from GPU: {name}")
+                    resp = client.post(f"{base}/api/generate", json={"model": name, "keep_alive": 0})
+                    if resp.status_code == 200:
+                        log.info(f"Ollama model unloaded from GPU: {name}")
+                    else:
+                        log.warning(f"Ollama could not unload {name}: HTTP {resp.status_code}")
         except Exception as e:
             log.warning(f"Could not release Ollama GPU memory: {e}")
 
@@ -2362,7 +2366,7 @@ def main():
     subwin_was_enabled = (subwin_cfg or {}).get("enabled", False)
 
     # Free graphics memory before the speech model loads: the start check compares it with
-    # what the speech + translation pair needs (the launcher measured it before starting us)
+    # what the speech + translation pair needs
     free_gb_at_start = local_model_prep.measure_free_gb(panel.get_settings())
 
     def _notify_local_model(title, text, error):
@@ -2372,12 +2376,20 @@ def main():
 
     local_starter = local_model_ui.LocalModelStarter(
         apply_settings=panel.replace_local_models, warm=_warm_local_model, notify=_notify_local_model,
-        log_dir=Path(__file__).parent / "logs", free_gb_at_start=free_gb_at_start, parent=app,
+        log_dir=Path(__file__).parent / "logs", get_settings=panel.get_settings,
+        free_gb_at_start=free_gb_at_start, parent=app,
     )
 
     def _use_local_model(model: str):
         # Settings → Translation → local models: download when needed, then switch to it
-        if not local_starter.start(panel.get_settings(), {"model": model}, confirmed=True):
+        settings = panel.get_settings()
+        entry = next((m for m in settings.get("models", [])
+                      if local_models.is_local_ollama(m) and m.get("model") == model), None)
+        if entry is None:
+            api_base = ollama_server.root_url(local_model_panel.ollama_port(settings)) + "/v1"
+            entry = local_models.catalog_entry(model, api_base) or {
+                "name": f"Ollama {model}", "api_base": api_base, "api_key": "ollama", "model": model}
+        if not local_starter.start(settings, entry, user_request=True):
             panel.notify_local_model_busy()
 
     panel.local_model_requested.connect(_use_local_model)

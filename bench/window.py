@@ -186,6 +186,7 @@ class BenchWindow(QWidget):
         self.dialogs = dialogs or Dialogs(self)
         self.proc = None
         self._command = None
+        self._stopped = False
         self._pipe = _Pipe()
         self._pipe.message.connect(self._on_message)
         self._pipe.error_line.connect(lambda line: self._append(line, warn=True))
@@ -248,19 +249,24 @@ class BenchWindow(QWidget):
             return False
         self._set_running(True)
         proc = self.proc
-        threading.Thread(target=self._read_stdout, args=(proc,), name="BenchOut", daemon=True).start()
-        threading.Thread(target=self._read_stderr, args=(proc,), name="BenchErr", daemon=True).start()
+        err = threading.Thread(target=self._read_stderr, args=(proc,), name="BenchErr", daemon=True)
+        err.start()
+        threading.Thread(target=self._read_stdout, args=(proc, err), name="BenchOut", daemon=True).start()
         return True
 
-    def _read_stdout(self, proc):
+    def _read_stdout(self, proc, err_reader=None):
         for line in proc.stdout:
             line = line.strip()
             if not line:
                 continue
             try:
-                self._pipe.message.emit(json.loads(line))
+                msg = json.loads(line)
             except ValueError:
-                self._pipe.message.emit({"t": "say", "lines": [line]})
+                msg = None
+            # anything that is not a protocol object is shown as text (a stray print, `1`, `null`)
+            self._pipe.message.emit(msg if isinstance(msg, dict) else {"t": "say", "lines": [line]})
+        if err_reader is not None:  # the last warnings are shown before "finished"
+            err_reader.join(timeout=10)
         self._pipe.finished.emit(proc.wait())
 
     def _read_stderr(self, proc):
@@ -278,6 +284,13 @@ class BenchWindow(QWidget):
             log.info(f"Benchmark ended before the answer: {e}")
 
     def _on_message(self, msg: dict):
+        try:
+            self._handle(msg)
+        except Exception as e:  # an exception in a Qt slot would abort the whole window
+            log.exception(f"Benchmark message not handled: {msg!r}")
+            self._append(f"無法處理評測程式的訊息：{type(e).__name__}: {e}", warn=True)
+
+    def _handle(self, msg: dict):
         kind = msg.get("t")
         if kind == "say":
             lines = msg.get("lines", [])
@@ -306,12 +319,13 @@ class BenchWindow(QWidget):
 
     def _on_finished(self, code: int):
         command = self._command
+        stopped, self._stopped = self._stopped, False
         self.proc = None
         self._command = None
         self.progress.setText("")
         self._set_running(False)
         if command != "status":
-            if code not in (0, None):
+            if code not in (0, None) and not stopped:  # a stop ends the child with code 1
                 self._append(f"（結束代碼 {code}）", warn=code != 130)
             self.run("status")  # the header shows what changed
 
@@ -332,6 +346,7 @@ class BenchWindow(QWidget):
         if not self.dialogs.confirm("要停止目前的評測嗎？已完成的部分會保留，之後可以從中斷的地方繼續。", False):
             return False
         self._append("已停止。", warn=True)
+        self._stopped = True
         self._kill(self.proc)
         return True
 
@@ -346,14 +361,17 @@ class BenchWindow(QWidget):
     def _open_app(self):
         if self.proc is not None:
             return
-        self._start_app()
+        if self._start_app() is False:
+            self._append("無法開啟 LiveTranslate，詳細原因在 logs\\bench_window.log；也可以用 LiveTranslate.exe 開啟。",
+                         warn=True)
+            return
         self.close()
 
     @staticmethod
-    def _start_livetranslate():
+    def _start_livetranslate() -> bool:
         import app_launch
 
-        app_launch.start_livetranslate(ROOT)
+        return app_launch.start_livetranslate(ROOT)
 
 
 def main() -> int:

@@ -81,9 +81,11 @@ class UpdateController(QObject):
         s = self.status
         if self._busy or s is None or not s.can_update:
             return False
-        if not self._confirm(t("update_confirm_title"), t("update_confirm_text").format(n=s.behind)):
-            return False
+        # busy while asking too: the quiet check after start must not run during the question
         self._busy = True
+        if not self._confirm(t("update_confirm_title"), t("update_confirm_text").format(n=s.behind)):
+            self._busy = False
+            return False
         self._show(t("update_pulling"), False, True)
 
         def work():

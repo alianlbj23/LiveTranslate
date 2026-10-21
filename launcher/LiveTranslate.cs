@@ -64,7 +64,19 @@ namespace LiveTranslateLauncher
                 ProcessStartInfo psi = new ProcessStartInfo(PythonW(root), "main.py");
                 psi.WorkingDirectory = root;
                 psi.UseShellExecute = false;
-                Process.Start(psi);
+                using (Process p = Process.Start(psi))
+                {
+                    // pythonw shows nothing when it fails at once (a broken package, a syntax error):
+                    // wait a moment and say where to look instead of silently doing nothing
+                    if (p.WaitForExit(10000) && p.HasExited && p.ExitCode != 0)
+                    {
+                        MessageBox.Show("LiveTranslate 啟動後馬上結束了（結束代碼 " + p.ExitCode + "）。\r\n"
+                                        + "請改用「LiveTranslate（除錯）.bat」啟動，黑色視窗會顯示原因；"
+                                        + "記錄也在 logs 資料夾。", "LiveTranslate",
+                                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return false;
+                    }
+                }
                 return true;
             }
             catch (Exception e)
@@ -87,6 +99,7 @@ namespace LiveTranslateLauncher
         readonly Button logButton;
         readonly Button closeButton;
         Process proc;
+        bool finished;  // after the exit, late output lines must not replace the final message
         public bool Succeeded;
 
         public SetupForm(string root, bool startNow)
@@ -167,6 +180,7 @@ namespace LiveTranslateLauncher
                 Fail("找不到安裝程式：" + script);
                 return;
             }
+            finished = false;
             startButton.Enabled = false;
             logButton.Visible = false;
             closeButton.Text = "中止";
@@ -220,7 +234,7 @@ namespace LiveTranslateLauncher
             output.AppendText(line + "\r\n");
             // setup.ps1 starts each step with "[HH:mm:ss] what it does"
             string t = line.Trim();
-            if (t.Length > 11 && t[0] == '[' && t[3] == ':' && t[6] == ':' && t[9] == ']')
+            if (!finished && t.Length > 11 && t[0] == '[' && t[3] == ':' && t[6] == ':' && t[9] == ']')
                 step.Text = t.Substring(10).Trim();
         }
 
@@ -228,6 +242,7 @@ namespace LiveTranslateLauncher
         {
             if (proc == null)
                 return;
+            finished = true;
             proc.WaitForExit();  // the last output lines arrive before this returns
             int code = proc.ExitCode;
             proc.Dispose();

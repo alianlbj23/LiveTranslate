@@ -37,6 +37,10 @@ def _python() -> str:
         p = ROOT / ".venv" / "Scripts" / name
         if p.exists():
             return str(p)
+    exe = Path(sys.executable)
+    console = exe.with_name("python.exe")
+    if exe.name.lower() == "pythonw.exe" and console.exists():
+        return str(console)  # pythonw has no stdout: the check's JSON would be lost
     return sys.executable
 
 

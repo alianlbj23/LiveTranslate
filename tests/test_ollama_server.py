@@ -183,27 +183,6 @@ def test_start_failure_is_raised(monkeypatch, tmp_path):
 # releasing the GPU
 # ---------------------------------------------------------------------------
 
-def test_release_unloads_and_stops_only_our_ollama(monkeypatch):
-    unloaded, stopped = [], []
-
-    class FakeOllama:
-        def __init__(self, root, http=None):
-            self.root = root
-
-        def unload_all(self, timeout=30.0):
-            unloaded.append(self.root)
-            return True
-
-    monkeypatch.setattr(osrv, "Ollama", FakeOllama)
-    monkeypatch.setattr(osrv, "stop_ollama", stopped.append)
-    monkeypatch.setattr(osrv, "pid_file_server", lambda: 77)
-    osrv.release(11435)
-    assert unloaded == ["http://127.0.0.1:11435"] and stopped == [77]
-    monkeypatch.setattr(osrv, "pid_file_server", lambda: None)  # someone else's Ollama
-    osrv.release(11434)
-    assert unloaded[-1] == "http://127.0.0.1:11434" and stopped == [77]
-
-
 def test_release_survives_an_ollama_that_does_not_answer(monkeypatch, caplog):
     class DeadOllama:
         def __init__(self, root, http=None):
@@ -212,10 +191,13 @@ def test_release_survives_an_ollama_that_does_not_answer(monkeypatch, caplog):
         def unload_all(self, timeout=30.0):
             raise httpx.ConnectError("refused")
 
+    stopped = []
     monkeypatch.setattr(osrv, "Ollama", DeadOllama)
-    monkeypatch.setattr(osrv, "pid_file_server", lambda: None)
-    osrv.release(11434)
-    assert "Could not unload" in caplog.text
+    monkeypatch.setattr(osrv, "pid_file_server", lambda: 77)
+    monkeypatch.setattr(osrv, "port_owner", lambda port: ("ollama.exe", 77))
+    monkeypatch.setattr(osrv, "stop_ollama", stopped.append)
+    assert osrv.release_ours() is True
+    assert "Could not unload" in caplog.text and stopped == [77]  # still stopped
 
 
 # ---------------------------------------------------------------------------
