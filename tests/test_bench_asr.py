@@ -4,7 +4,6 @@ The benchmark copies a few pieces of main.py that cannot be imported on their ow
 worker config, the Translator arguments, the subtitle filters). These tests compare the
 copies with main.py so a change there cannot silently skew the benchmark."""
 import ast
-import re
 from pathlib import Path
 
 import numpy as np
@@ -332,19 +331,6 @@ def test_lmstudio_unload_reports_a_failed_cli(monkeypatch, caplog, real_llm_serv
     with caplog.at_level("WARNING"):
         assert real_llm_servers["lmstudio_unload_all"]() is expected
     assert ("no server running" in caplog.text) is (not expected)
-
-
-# ---------------------------------------------------------------- Ollama settings in sync
-
-def test_fast_ollama_settings_match_the_launcher():
-    script = (ROOT / "launcher" / "start_jp_subtitles.ps1").read_text(encoding="utf-8-sig")
-    block = script[script.index("function Start-WindowsOllama"):script.index("Start-Process -FilePath $Ollama")]
-    launcher = dict(re.findall(r'\$env:(OLLAMA_\w+)\s*=\s*"([^"]+)"', block))
-    ours = llm_servers.fast_env(11434)
-    assert set(launcher) == set(ours)
-    for key, value in launcher.items():
-        if key != "OLLAMA_HOST":
-            assert ours[key] == value, key
 
 
 def test_model_kind_and_fingerprint():

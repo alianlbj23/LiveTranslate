@@ -37,3 +37,6 @@ launcher/selected_model.txt.tmp
 # best-combination benchmark: downloaded test clips, results and settings backups (local only)
 bench_clips/
 bench_results/
+
+# Built by launcher/build_exe.ps1 (setup.ps1 / build_release.ps1)
+/LiveTranslate.exe

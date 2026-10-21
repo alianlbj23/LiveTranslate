@@ -117,7 +117,7 @@ def _download_all(con: Console, source_factory, log_path) -> int:
         except datasets.CodecError as e:
             log.error(f"Download of {key} stopped: {e}")
             con.say("", f"  這台電腦無法解碼下載的音檔：{e}",
-                    "  資料本身沒有問題，不要刪除已下載的資料。請重新執行安裝或更新（update.bat）修復音訊套件"
+                    "  資料本身沒有問題，不要刪除已下載的資料。請在 LiveTranslate 的 設定 → 首頁 → 維護 更新，或刪除 .venv 後重新開啟 LiveTranslate 重新安裝，修復音訊套件"
                     f"（soundfile / librosa），再選 1 繼續；詳細原因在 {log_path}。")
             return 1
         except datasets.DataError as e:
@@ -178,7 +178,7 @@ def _installed_from_manifests(models) -> set:
 
 
 def manifest_path(manifests: Path, model: str) -> Path:
-    """Same rule as launcher/gui.ps1 Test-OllamaModelDownloaded:
+    """Where Ollama keeps the manifest of a downloaded model:
     qwen3.5:9b -> registry.ollama.ai/library/qwen3.5/9b, hf.co/Org/Repo:TAG -> hf.co/Org/Repo/TAG."""
     name, tag = model, "latest"
     i = model.rfind(":")
@@ -617,8 +617,6 @@ def _apply(con: Console) -> int:
         con.say("  （語音偵測閾值沒有實測，維持你目前的設定）")
     if not is_cached(CANDIDATES_BY_ID[choice["asr"]], settings.get("hub", "ms")):
         con.say("  （這個辨識模型還沒下載，LiveTranslate 啟動時會自動下載）")
-    for note in settings_io.apply_notes(entry):
-        con.say(f"  注意：{note}")
     if not con.confirm("確定套用？", False):
         return 0
     saved = settings_io.apply_changes(changes, entry)

@@ -3,7 +3,10 @@ from pathlib import Path
 import pytest
 
 
-INSTALL_ENTRYPOINTS = ("install.ps1", "update.bat", "build_release.ps1")
+import re
+
+# The installer (LiveTranslate.exe runs it hidden) and the update window install packages
+INSTALL_ENTRYPOINTS = ("launcher/setup.ps1", "launcher/update_window.ps1")
 
 
 def _requirement_lines() -> set[str]:
@@ -35,24 +38,23 @@ def test_numpy_numba_versions_support_python_312_resolution():
 
 @pytest.mark.parametrize("path", INSTALL_ENTRYPOINTS)
 def test_install_entrypoint_resolves_funasr_dependencies(path: str):
-    installer = Path(path).read_text(encoding="utf-8").lower()
+    installer = Path(path).read_text(encoding="utf-8-sig").lower()
 
-    assert "-r requirements.txt" in installer
+    assert re.search(r'"?-r"?[\s,(]+[^\n]*requirements\.txt', installer)
     assert "--no-deps" not in installer
 
 
 def test_update_stops_when_dependency_installation_fails():
-    updater = Path("update.bat").read_text(encoding="utf-8").lower()
-    dependency_block = updater.split("install -r requirements.txt", 1)[1].split(
-        'install "yasbd-lib', 1
-    )[0]
-
-    assert "exit /b 1" in dependency_block
+    """A failed pip step ends the update window's steps (no later step, no restart); the
+    run itself is tested in test_app_update.py."""
+    updater = Path("launcher/update_window.ps1").read_text(encoding="utf-8-sig")
+    steps = updater[updater.index('"steps" {'):updater.index('"launch" {')]
+    assert steps.index("if ($code -ne 0) { Set-Failed") < steps.index("$script:StepIndex++")
 
 
 @pytest.mark.parametrize("path", INSTALL_ENTRYPOINTS)
 def test_install_entrypoints_pin_yasbd_and_drop_pysbd(path: str):
-    installer = Path(path).read_text(encoding="utf-8").lower()
+    installer = Path(path).read_text(encoding="utf-8-sig").lower()
 
     assert 'yasbd-lib>=0.15,<1.0' in installer
     assert "install pysbd" not in installer

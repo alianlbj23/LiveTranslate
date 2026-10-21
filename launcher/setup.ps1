@@ -1,11 +1,13 @@
 ﻿# LiveTranslate 一鍵安裝
-# 第一次雙擊 LiveTranslate.bat 時（找不到 .venv）會自動執行；也可手動：powershell -File launcher\setup.ps1
+# 第一次開啟 LiveTranslate.exe 時，安裝視窗會在背景執行它（-Yes，輸出顯示在視窗裡）；
+# 除錯入口 LiveTranslate（除錯）.bat 則在命令列執行。也可手動：powershell -File launcher\setup.ps1
 # 會做的事：檢查驅動／網路／磁碟 → winget 安裝 Python、Git、Ollama（缺的才裝）→ 建 .venv 並安裝套件
 #          → 預載 cuBLAS DLL → 依顯示卡大小選預設的辨識＋翻譯模型（hardware_profile.py）→ 下載 Whisper
-#          （選到它才下載）→ 寫入預設設定。翻譯模型由啟動腳本在之後下載。
+#          （選到它才下載）→ 寫入預設設定 → 產生 LiveTranslate.exe。翻譯模型由 LiveTranslate 第一次啟動時
+#          詢問並下載。
 param(
-    [switch]$Yes,          # 不問直接開始（測試用）
-    [switch]$SkipModels    # 不下載 Whisper 模型、不寫設定（測試用）
+    [switch]$Yes,          # 不問直接開始（安裝視窗已經問過；測試也用）
+    [switch]$SkipModels    # 不下載 Whisper 模型、不寫設定、不產生 exe（測試用）
 )
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ErrorActionPreference = "Continue"   # 用 $LASTEXITCODE 逐步檢查，pip/winget 的 stderr 不會變成例外
@@ -18,7 +20,6 @@ $LogFile = Join-Path $LogDir ("setup_" + (Get-Date -Format "yyyyMMdd_HHmmss") + 
 Start-Transcript -Path $LogFile -Append | Out-Null
 
 . (Join-Path $PSScriptRoot "vram.ps1")   # Get-InstallChoice
-. (Join-Path $PSScriptRoot "model.ps1")  # Set-LauncherModel
 
 function Write-Step { param($m) Write-Host "`n[$((Get-Date).ToString('HH:mm:ss'))] $m" -ForegroundColor Cyan }
 function Write-Ok   { param($m) Write-Host "  [完成] $m" -ForegroundColor Green }
@@ -62,7 +63,7 @@ Write-Host "   LiveTranslate 一鍵安裝" -ForegroundColor Magenta
 Write-Host "==========================================" -ForegroundColor Magenta
 Write-Host "  安裝位置：$Root"
 Write-Host "  最多會下載約 12 GB（Python 套件約 5 GB；語音與翻譯模型依顯示卡大小選擇，最多約 8 GB），需要 20–40 分鐘。"
-Write-Host "  過程中不用操作；若中途失敗，重新雙擊 LiveTranslate.bat 會從沒完成的地方繼續。"
+Write-Host "  過程中不用操作；若中途失敗，重新開啟 LiveTranslate 會從沒完成的地方繼續。"
 if (-not $Yes) {
     $a = Read-Host "  按 Enter 開始，或輸入 n 取消"
     if ($a -match '^[nN]') { Stop-Transcript | Out-Null; exit 0 }
@@ -107,7 +108,7 @@ $PyExe = Find-Python
 if (-not $PyExe) {
     Install-Winget "Python.Python.3.12" "Python 3.12"
     $PyExe = Find-Python
-    if (-not $PyExe) { Fail "Python 已安裝但這個視窗還找不到它。請關閉視窗，重新雙擊 LiveTranslate.bat 一次。" }
+    if (-not $PyExe) { Fail "Python 已安裝但這次安裝還找不到它。請關閉後重新開啟 LiveTranslate 一次。" }
 }
 Write-Ok "Python：$PyExe"
 if (-not (Test-Cmd git)) { Install-Winget "Git.Git" "Git" } else { Write-Ok "Git 已安裝" }
@@ -126,7 +127,7 @@ if (-not (Test-Path $VenvPy)) {
     & $PyExe -m venv $VenvDir
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VenvPy)) { Fail "建立 .venv 失敗" }
 }
-# pip 快取與暫存放在專案內，裝完刪掉（和上游 install.ps1 一樣，不塞爆系統碟）
+# pip 快取與暫存放在專案內，裝完刪掉（不塞爆系統碟）
 $env:PIP_CACHE_DIR = Join-Path $Root ".pip-cache"
 $env:TMP  = Join-Path $Root ".tmp"
 $env:TEMP = $env:TMP
@@ -223,19 +224,22 @@ if (-not $SkipModels) {
         Write-Step "寫入預設設定（日文 → 台灣繁體中文、即時預覽）..."
         & $VenvPy -I (Join-Path $Root "launcher\write_settings.py") $Root $WhisperPath "http://127.0.0.1:11434/v1" $choice.model $choice.asr_choice
         if ($LASTEXITCODE -ne 0) { Fail "寫入設定失敗" }
-        # 啟動腳本依 selected_model.txt 下載並使用翻譯模型
-        if (-not (Set-LauncherModel -Path (Join-Path $Root "launcher\selected_model.txt") -Model $choice.model)) {
-            Fail "無法記下選擇的翻譯模型（launcher\selected_model.txt）"
-        }
-        Write-Ok "設定完成"
+        Write-Ok "設定完成（翻譯模型 $($choice.label) 是使用中的模型）"
     }
 }
 
-$next = "接下來會啟動程式並下載翻譯模型（只需一次）"
-if ($choice) { $next = "接下來會啟動程式並下載翻譯模型 {0}（約 {1:0.0} GB，只需一次）" -f $choice.label, [double]$choice.size_gb }
+# ---------- 5. LiveTranslate.exe（沒有命令列視窗的入口；git 版在這裡產生，安裝包已附上） ----------
+if (-not $SkipModels -and -not (Test-Path -LiteralPath (Join-Path $Root "LiveTranslate.exe"))) {
+    Write-Step "產生 LiveTranslate.exe..."
+    & (Join-Path $PSScriptRoot "build_exe.ps1")
+    if ($LASTEXITCODE -ne 0) { Write-Warn "LiveTranslate.exe 產生失敗；仍可用 LiveTranslate（除錯）.bat 啟動。" }
+}
+
+$next = "第一次開啟時會詢問並下載翻譯模型（只需一次）"
+if ($choice) { $next = "第一次開啟時會詢問並下載翻譯模型 {0}（約 {1:0.0} GB，只需一次）" -f $choice.label, [double]$choice.size_gb }
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
-Write-Host "   安裝完成！$next" -ForegroundColor Green
+Write-Host "   安裝完成！之後雙擊 LiveTranslate.exe 開啟；$next" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  紀錄：$LogFile" -ForegroundColor DarkGray
 Stop-Transcript | Out-Null

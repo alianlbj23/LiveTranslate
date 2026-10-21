@@ -1,5 +1,5 @@
 """Update check / update of a git checkout (Settings → Home → Maintenance, plus a quiet check
-after start). Ported from launcher/update.ps1: fast-forward only, skipped while tracked
+after start). Replaces the old launcher/update.ps1: fast-forward only, skipped while tracked
 files have local changes. When requirements.txt changed, the packages are reinstalled by
 launcher/update_window.ps1 after LiveTranslate has closed (pip cannot replace the DLLs a
 running app holds); that window then starts LiveTranslate again. No Qt."""

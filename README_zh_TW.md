@@ -12,7 +12,7 @@ Windows 即時音訊翻譯工具。捕獲系統音訊（WASAPI loopback）和可
 
 > ### 關於這個 fork（alianlbj23/LiveTranslate）
 > 在原專案基礎上加入：**繁體中文（台灣）介面**（`i18n/zh_TW.yaml`）、Whisper `beam_size` 可在 `config.yaml` 設定（預設 greedy）、
-> 專為「YouTube 日文直播 → 日文 + 台灣繁體中文雙字幕、本機 Ollama 翻譯」設計的單一入口腳本（`LiveTranslate.bat`：啟動／檢查環境／切換模型／更新／停止 Ollama）與快速模式。
+> 專為「YouTube 日文直播 → 日文 + 台灣繁體中文雙字幕、本機 Ollama 翻譯」設計：雙擊 `LiveTranslate.exe` 就開（第一次自動安裝，之後完全不出現命令列）；程式自己管理 Ollama，切換／下載模型（依顯示卡標示推薦）、檢查環境、更新、最佳組合評測都在設定裡。
 > 完整的安裝、設定、疑難排解請看 [INSTALL_GUIDE.md](INSTALL_GUIDE.md)。
 
 ## 截圖
@@ -51,9 +51,9 @@ Windows 即時音訊翻譯工具。捕獲系統音訊（WASAPI loopback）和可
 
 ## 快速開始
 
-### 免安裝版（免裝 Python，推薦新手）
+### 安裝包（推薦新手）
 
-從 [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases) 下載 `LiveTranslate-portable-*.zip`，解壓後雙擊 **`start.bat`** 即可。首次執行會自動下載便攜版 Python 3.12 並按顯示卡安裝依賴，無需預裝任何 Python。
+從 [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases) 下載 `LiveTranslate-portable-*.zip`，解壓到沒有中文、沒有空格的路徑，雙擊 **`LiveTranslate.exe`**。第一次會出現安裝視窗（缺的話用 winget 安裝 Python、Git、Ollama，再安裝套件、語音模型，並依顯示卡選預設模型）；之後雙擊就直接開啟，完全不會出現命令列視窗。Windows 如果跳出「Windows 已保護您的電腦」：按「其他資訊」→「仍要執行」（程式沒有付費的數位簽章）。
 
 ### 從原始碼安裝
 
@@ -62,15 +62,9 @@ git clone https://github.com/TheDeathDragon/LiveTranslate.git
 cd LiveTranslate
 ```
 
-雙擊 **`install.bat`** 一鍵安裝——指令碼會自動：
-1. 檢測 Python 3.10–3.12（未安裝則透過 winget 自動安裝）
-2. 建立虛擬環境
-3. 檢測 NVIDIA 顯示卡，選擇 CUDA / CPU 版 PyTorch
-4. 安裝全部依賴
+雙擊 **`LiveTranslate（除錯）.bat`**（除錯入口）：第一次會在命令列執行同一套安裝（`launcher\setup.ps1`）並產生 `LiveTranslate.exe`；之後雙擊 `LiveTranslate.exe` 開啟（沒有命令列），或繼續用除錯入口看即時記錄。
 
-安裝完成後雙擊 **`start.bat`** 啟動。
-
-更新時雙擊 **`update.bat`**——自動拉取最新程式碼並更新依賴（未安裝 Git 會透過 winget 自動安裝）。
+更新：LiveTranslate 開啟後會在背景檢查 GitHub；有新版本時到 設定 → 首頁 → 維護 →「更新並重新啟動」。
 
 <details>
 <summary>手動安裝</summary>

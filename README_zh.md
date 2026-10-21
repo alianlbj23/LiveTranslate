@@ -46,9 +46,9 @@ Windows 实时音频翻译工具。捕获系统音频（WASAPI loopback）和可
 
 ## 快速开始
 
-### 绿色版（免装 Python，推荐新手）
+### 安装包（推荐新手）
 
-从 [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases) 下载 `LiveTranslate-portable-*.zip`，解压后双击 **`start.bat`** 即可。首次运行会自动下载便携版 Python 3.12 并按显卡安装依赖，无需预装任何 Python。
+从 [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases) 下载 `LiveTranslate-portable-*.zip`，解压到没有中文、没有空格的路径，双击 **`LiveTranslate.exe`**。第一次会打开安装窗口（缺少时通过 winget 安装 Python、Git、Ollama，再安装依赖包、语音模型，并按显卡选择默认模型）；之后双击就直接打开，完全不会出现命令行窗口。Windows 如果提示「Windows 已保护你的电脑」：点「更多信息」→「仍要运行」（程序没有付费的数字签名）。
 
 ### 从源码安装
 
@@ -57,15 +57,9 @@ git clone https://github.com/TheDeathDragon/LiveTranslate.git
 cd LiveTranslate
 ```
 
-双击 **`install.bat`** 一键安装——脚本会自动：
-1. 检测 Python 3.10–3.12（未安装则通过 winget 自动安装）
-2. 创建虚拟环境
-3. 检测 NVIDIA 显卡，选择 CUDA / CPU 版 PyTorch
-4. 安装全部依赖
+双击 **`LiveTranslate（除錯）.bat`**（调试入口）：第一次会在命令行里运行同一套安装（`launcher\setup.ps1`）并生成 `LiveTranslate.exe`；之后双击 `LiveTranslate.exe` 打开（没有命令行），或继续用调试入口查看实时日志。
 
-安装完成后双击 **`start.bat`** 启动。
-
-更新时双击 **`update.bat`**——自动拉取最新代码并更新依赖（未安装 Git 会通过 winget 自动安装）。
+更新：LiveTranslate 打开后会在后台检查 GitHub；有新版本时到 设置 → 首页 → 维护 →「更新并重新启动」。
 
 <details>
 <summary>手动安装</summary>

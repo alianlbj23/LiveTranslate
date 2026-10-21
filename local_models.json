@@ -1,5 +1,5 @@
 {
-  "_comment": "Local (Ollama) translation models offered by the launcher menu and the model combo. Read by local_models.py, hardware_profile.py and launcher/gui.ps1. size_gb = download size; vram_gb = GPU memory while translating with the launcher's Ollama settings (best-combination benchmark 2026-10-20, peak minus the idle card); rank = translation quality order in that benchmark (1 = best), used to recommend a model that fits the card.",
+  "_comment": "Local (Ollama) translation models offered in Settings → Translation → Local translation models and the model combo. Read by local_models.py and hardware_profile.py. size_gb = download size; vram_gb = GPU memory while translating with the launcher's Ollama settings (best-combination benchmark 2026-10-20, peak minus the idle card); rank = translation quality order in that benchmark (1 = best), used to recommend a model that fits the card.",
   "default": "qwen3.5:9b",
   "models": [
     {

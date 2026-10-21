@@ -1,6 +1,6 @@
-﻿# 顯示卡看門狗：由 start_jp_subtitles.ps1 以隱藏視窗啟動（和主視窗不同主控台，叉掉主視窗不會一起死）。
-# 等啟動腳本結束（正常結束、按叉叉、當掉都算）後：卸載 Ollama 裡所有模型，並關閉啟動腳本開的 ollama serve。
-# 正常結束時啟動腳本已先清過，這裡會發現沒事做；所有動作都是可重複的。
+﻿# 顯示卡看門狗：LiveTranslate 啟動 Ollama 時（ollama_server.start_watchdog）以隱藏視窗啟動。
+# 等 LiveTranslate 結束（正常結束、當掉都算）後：卸載 Ollama 裡所有模型，並關閉它開的 ollama serve。
+# 正常結束時 LiveTranslate 已先清過，這裡會發現沒事做；所有動作都是可重複的。
 param(
     [Parameter(Mandatory = $true)][int]$ParentPid,
     [Parameter(Mandatory = $true)][int]$Port,

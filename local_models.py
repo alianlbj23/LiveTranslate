@@ -11,10 +11,11 @@ from pathlib import Path
 log = logging.getLogger("LiveTranslate.Models")
 
 CATALOG_FILE = Path(__file__).with_name("local_models.json")
-# Read by launcher/model.ps1; tests point this at a sandbox (tests/conftest.py)
+# The local model picked last (written when switching models); tests point this at a
+# sandbox (tests/conftest.py)
 SELECTED_MODEL_FILE = Path(__file__).parent / "launcher" / "selected_model.txt"
 
-# Same rule as launcher/model.ps1 Test-LauncherModelName: the name reaches `ollama pull`
+# The name reaches `ollama pull`
 # and JSON request bodies, so nothing but a plain model tag is accepted.
 MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _AUTO_NAME_RE = re.compile(r"^Ollama [A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")

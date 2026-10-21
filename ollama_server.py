@@ -2,8 +2,8 @@
 port, download models with progress and release the GPU.
 
 Used by main.py (start / quit), the control panel (model downloads) and bench/
-(bench/llm_servers re-exports it). The port rules are the ones the old launcher
-(launcher/start_jp_subtitles.ps1) used: 11434, or 11435 when another Ollama (usually the
+(bench/llm_servers re-exports it). The port rules are the ones the old console
+launcher used: 11434, or 11435 when another Ollama (usually the
 one inside WSL) holds 11434 without the model; a tray Ollama without the fast settings is
 replaced."""
 import json

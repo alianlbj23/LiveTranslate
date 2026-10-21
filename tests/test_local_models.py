@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 import local_models as lm  # noqa: E402
 
 API = "http://127.0.0.1:11434/v1"
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")  # launcher/model.ps1 rule
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")  # a plain model tag (it reaches `ollama pull`)
 SAKURA = "hf.co/SakuraLLM/Sakura-GalTransl-7B-v3:IQ4_XS"
 
 

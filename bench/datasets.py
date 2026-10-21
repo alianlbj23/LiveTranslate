@@ -64,7 +64,7 @@ DATASETS = {
                  "label": "基準（Common Voice 8.0）"},
 }
 LIVE_EXTENSIONS = (".wav", ".flac", ".mp3", ".ogg")
-APPROX_TOTAL_MB = 550  # measured once; also in launcher/bench.ps1 and CLAUDE.md (update with PER_GROUP / n)
+APPROX_TOTAL_MB = 550  # measured once; also in CLAUDE.md (update with PER_GROUP / n)
 
 LICENSE_NOTE = (
     "授權說明：動畫資料集（japanese-anime-speech-v2）標示 GPL，音源是有版權的動畫；"

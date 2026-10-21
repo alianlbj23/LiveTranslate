@@ -114,16 +114,6 @@ def planned_changes(settings: dict, asr_id: str, vad_threshold, tl_entry: dict) 
     return {k: (settings.get(k), v) for k, v in new.items() if settings.get(k) != v}
 
 
-def apply_notes(tl_entry: dict) -> list:
-    """What the user should know before applying (shown, not blocking)."""
-    import local_models
-
-    if local_models.is_local_ollama(tl_entry):
-        return []
-    return ["這是非 Ollama 的翻譯模型：用啟動視窗（LiveTranslate.bat）啟動時，啟動器會把翻譯模型改回它選的本機模型。"
-            "要使用這個模型，請在字幕開始後，從對話記錄視窗上方的模型選單切換。"]
-
-
 def _atomic_write_json(path: Path, data):
     from bench.state import atomic_write_json
 

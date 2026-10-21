@@ -1,7 +1,7 @@
 # LiveTranslate 日文直播 → 中日雙字幕 安裝與使用指南
 
 > 本文件依 2026-10-17 ～ 10-18 在這台電腦上**實際執行的結果**撰寫。所有元件都在 Windows 原生環境（PowerShell）執行，沒有使用 WSL 或 Docker。
-> 專案已 fork 到 https://github.com/alianlbj23/LiveTranslate（`origin`），原作者為 `upstream`。本 fork 相對原版的修改：繁體中文介面、Whisper beam size 可設定（預設 greedy）、快速模式啟動腳本、本文件與 `launcher\` 工具。
+> 專案已 fork 到 https://github.com/alianlbj23/LiveTranslate（`origin`），原作者為 `upstream`。本 fork 相對原版的修改：繁體中文介面、Whisper beam size 可設定（預設 greedy）、快速模式（程式自己管理 Ollama）、沒有命令列的 `LiveTranslate.exe` 入口與安裝視窗、本文件與 `launcher\` 工具。
 
 ---
 
@@ -38,14 +38,14 @@
 
 - **WSL 裡面已經有另一個 Ollama 0.34.0**（Ubuntu-22.04 / 24.04 都在執行），它透過 `wslrelay.exe` 佔住了 `localhost:11434`，裡面只有 `qwen2.5:3b`。
 - 依規則沒有動 WSL。Windows 版 Ollama 安裝後偵測到 11434 已有服務，就不會自己開服務。
-- 因此桌面啟動腳本會**自動判斷**：11434 若是 Windows 版 Ollama 就直接用；若是 WSL 的且沒有 `qwen3.5:9b`，就把 Windows 版 Ollama 開在 **11435**，並自動把 LiveTranslate 的 API 位址改成對應的埠。你不需要手動處理。
+- 因此 LiveTranslate 啟動時會**自動判斷**：11434 若是 Windows 版 Ollama 就直接用；若是 WSL 的且沒有 `qwen3.5:9b`，就把 Windows 版 Ollama 開在 **11435**，並自動把 LiveTranslate 的 API 位址改成對應的埠。你不需要手動處理。
 - 副作用：在 PowerShell 打 `ollama --version` 會顯示 `0.34.0`（那是 WSL 那台回答的），Windows 版實際是 0.40.5。
 
 ---
 
 ## 2. 從零重裝的完整步驟
 
-> **最快的方式（本 fork）**：把資料夾放到沒有中文與空格的路徑，雙擊 `LiveTranslate.bat`。找不到 `.venv` 時會自動執行 `launcher\setup.ps1`：檢查驅動／網路／磁碟 → 用 winget 安裝缺少的 Python、Git、Ollama → 建 `.venv` 並依顯示卡自動選 cu128/cu126 → 寫入 cuBLAS DLL 預載 → 下載 Whisper large-v3-turbo → 寫預設設定，最後啟動並下載 qwen3.5:9b。過程記錄在 `logs\setup_*.log`。唯一要先手動裝的是 NVIDIA 驅動。給一般使用者的說明見 `快速開始.md`。下面是對應的手動步驟。
+> **最快的方式（本 fork）**：把資料夾放到沒有中文與空格的路徑，雙擊 `LiveTranslate.exe`（安裝包內附；git 版第一次先雙擊 `LiveTranslate（除錯）.bat`，它會產生 exe）。沒安裝時 exe 會開「安裝 LiveTranslate」視窗，在背景執行 `launcher\setup.ps1`：檢查驅動／網路／磁碟 → 用 winget 安裝缺少的 Python、Git、Ollama → 建 `.venv` 並依顯示卡自動選 cu128/cu126 → 寫入 cuBLAS DLL 預載 → 依顯示卡選預設的辨識＋翻譯模型並下載 Whisper large-v3-turbo（選到它才下載）→ 寫預設設定 → 產生 `LiveTranslate.exe`，最後啟動程式；第一次啟動時程式會詢問並下載選定的翻譯模型。過程顯示在安裝視窗、記錄在 `logs\setup_*.log`。唯一要先手動裝的是 NVIDIA 驅動。給一般使用者的說明見 `快速開始.md`。下面是對應的手動步驟。
 
 
 > 以下指令都在 **PowerShell** 執行。若只是想重新安裝，先看第 7 節解除安裝。
@@ -104,11 +104,11 @@ New-Item -ItemType Directory -Force D:\workspace | Out-Null
 git clone https://github.com/TheDeathDragon/LiveTranslate D:\workspace\language_translate
 ```
 
-它會安裝的東西（來自 `install.ps1` / `requirements.txt`）：Python venv、PyTorch + torchaudio（CUDA 版）、faster-whisper / CTranslate2、FunASR 與相依（SenseVoice 用）、transformers、silero-vad、PyQt6（字幕視窗）、openai（呼叫翻譯 API）、PyAudioWPatch（WASAPI 擷取系統聲音）、yasbd-lib（斷句）。
+它會安裝的東西（來自 `launcher\setup.ps1` / `requirements.txt`）：Python venv、PyTorch + torchaudio（CUDA 版）、faster-whisper / CTranslate2、FunASR 與相依（SenseVoice 用）、transformers、silero-vad、PyQt6（字幕視窗）、openai（呼叫翻譯 API）、PyAudioWPatch（WASAPI 擷取系統聲音）、yasbd-lib（斷句）。
 
 ### 步驟 5：安裝相依套件（手動流程）
 
-`install.bat` 會用 `Read-Host` 問你要 CUDA 還是 CPU，無法自動化，所以本次照 README 的手動流程做，等同於 install.ps1 的動作：
+以下是手動流程，等同於 `launcher\setup.ps1` 的動作：
 
 ```powershell
 Set-Location D:\workspace\language_translate
@@ -126,7 +126,7 @@ New-Item -ItemType Directory -Force $env:TMP | Out-Null
 .\.venv\Scripts\python.exe -m pip check          # 預期：No broken requirements found.
 
 Remove-Item -Recurse -Force .pip-cache, .tmp
-Set-Content .venv\.livetranslate-ready (Get-Date -Format o) -Encoding ascii   # start.bat 會檢查這個標記
+Set-Content .venv\.livetranslate-ready (Get-Date -Format o) -Encoding ascii   # LiveTranslate.exe 與除錯入口會檢查這個標記
 ```
 
 ### 步驟 6：修正 CTranslate2 找不到 cuBLAS DLL
@@ -168,16 +168,16 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 
 | 檔案 | 用途 |
 |---|---|
-| `D:\workspace\language_translate\LiveTranslate.bat` | **唯一入口**：點兩下出現選單，直接按 Enter 啟動雙字幕；輸入數字進其他功能 |
-| `D:\workspace\language_translate\launcher\start_jp_subtitles.ps1` | 啟動邏輯：檢查/啟動 Ollama → 確認模型 → 校正 API 埠 → 啟動 LiveTranslate |
-| `launcher\menu.ps1` | 入口：開啟動視窗（`gui.ps1`），視窗開不了時改用文字選單；也可 `-Action start|verify|setup` 直接執行 |
-| `launcher\gui.ps1` | 啟動視窗（WinForms）：啟動字幕、翻譯模型清單（顯示是否已下載與大小，下載前確認）、檢查環境、最佳組合評測、使用說明 |
-| `launcher\bench.ps1` / `launcher\bench_run.py` / `bench\` | 最佳組合評測：下載測試資料、分階段評測（辨識 → 語音偵測閾值 → 翻譯）、看報告（`bench_results\<日期時間>\report.html`）、套用推薦組合。測試資料在 `bench_clips\`（下載紀錄 `bench_clips\download.log`），兩個資料夾都不會加入 git。第 2 階段（語音偵測閾值）要用自己的錄音：VTuber 放在 `bench_clips\live\`，動畫放在 `bench_clips\live\anime\`（wav / flac / mp3 / ogg）；沒有錄音就略過，閾值維持目前的設定。套用前的設定備份在 `bench_results\settings_backups\`，刪掉 `bench_results` 備份也會一起刪掉 |
+| `D:\workspace\language_translate\LiveTranslate.exe` | **正式入口**（沒有命令列視窗）：已安裝就直接啟動程式；沒安裝（缺 `.venv`、就緒標記或 `user_settings.json`）就開安裝視窗，在背景執行 `launcher\setup.ps1`。原始碼 `launcher\LiveTranslate.cs`，由 `launcher\build_exe.ps1` 用 Windows 內建的 C# 編譯器產生（git 不追蹤；安裝包已附上，git 版在安裝最後產生），圖示 `assets\LiveTranslate.ico` |
+| `LiveTranslate（除錯）.bat` | 除錯入口：在命令列執行並即時顯示記錄；沒安裝時在命令列執行 `setup.ps1`。安裝包不附 |
+| `launcher\setup.ps1`、`vram.ps1`、`hardware_advice.py`、`write_settings.py`、`download_whisper_turbo.py` | 安裝流程（唯一的一套，安裝包與 git 版共用） |
+| `ollama_server.py`、`local_model_prep.py`、`local_model_ui.py` | 程式自己管理 Ollama：以快速設定啟動、選連接埠（WSL 佔用 11434 時改用 11435）、沒下載的翻譯模型先詢問再下載（進度視窗）、把模型項目指到正確的連接埠、檢查可用顯示記憶體；結束時卸載模型並關閉自己開的 Ollama |
+| `local_model_panel.py` | 設定 → 翻譯 → 本機翻譯模型：大小、是否已下載、依顯示卡標示【推薦】【接近上限】【顯示卡可能不夠】，「下載並使用」 |
+| `env_check.py`、`env_check_ui.py` | 設定 → 首頁 → 維護 → 檢查環境：驅動、PyTorch／CTranslate2 CUDA、Ollama、翻譯測試，結果可複製 |
+| `app_update.py`、`app_update_ui.py`、`launcher\update_window.ps1` | 更新：啟動後在背景檢查（git fetch，只做 fast-forward，本機有修改就略過）；設定 → 首頁 → 維護「更新並重新啟動」；requirements 有變時，程式關閉後由更新視窗重裝套件再重新啟動 |
+| `bench\window.py`、`launcher\bench_window.py`、`launcher\bench_run.py`、`bench\` | 最佳組合評測（設定 → 首頁 → 維護開啟，評測時 LiveTranslate 會先關閉）：最佳組合評測：下載測試資料、分階段評測（辨識 → 語音偵測閾值 → 翻譯）、看報告（`bench_results\<日期時間>\report.html`）、套用推薦組合。測試資料在 `bench_clips\`（下載紀錄 `bench_clips\download.log`），兩個資料夾都不會加入 git。第 2 階段（語音偵測閾值）要用自己的錄音：VTuber 放在 `bench_clips\live\`，動畫放在 `bench_clips\live\anime\`（wav / flac / mp3 / ogg）；沒有錄音就略過，閾值維持目前的設定。套用前的設定備份在 `bench_results\settings_backups\`，刪掉 `bench_results` 備份也會一起刪掉 |
 | `local_models.json` / `local_models.py` | 本機翻譯模型清單（Qwen3.5 9B / 4B、Sakura GalTransl 7B）；啟動時把已下載的模型同步成設定裡的模型項目，執行中切換會記住選擇 |
-| `launcher\model.ps1` | 讀寫 `launcher\selected_model.txt`（目前選用的翻譯模型）並驗證名稱；啟動、檢查、選單共用 |
-| `launcher\update.ps1` | 每次啟動的自動更新檢查（git fetch/pull --ff-only，requirements 變了才重裝套件） |
-| `launcher\verify.ps1` | 驗證 GPU / Whisper CUDA / Ollama / 翻譯（選單的 2） |
-| `launcher\set_api_base.py`、`write_settings.py`、`download_whisper_turbo.py` | 上面腳本用的小工具 |
+| `launcher\gpu_watchdog.ps1` | 看門狗（隱藏）：LiveTranslate 當掉時卸載模型並關閉它開的 Ollama |
 
 ---
 
@@ -192,7 +192,7 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | `max_speech_duration`（長句強制切分） | 8.0 s | **5.0 s** | 長句不用等 8 秒 |
 | 翻譯模型 `context_turns`（帶入的上下文句數） | 5 | **3** | 每句少處理約一半的提示詞 |
 | Ollama `OLLAMA_KEEP_ALIVE=30m` | 閒置 5 分鐘卸載 | **閒置 30 分鐘才卸載** | 直播安靜一陣後第一句不用等 10–30 秒重載；程式正常結束時會立刻釋放（見下） |
-| **關閉即釋放顯示卡** | 無 | **有** | 結束 LiveTranslate 時程式會呼叫 Ollama 卸載翻譯模型，啟動腳本接著關閉自己開的 Ollama 服務；Whisper 子程序隨程式結束釋放。另有隱藏的看門狗（`launcher\gpu_watchdog.ps1`，紀錄在 `logs\gpu_watchdog.log`）：直接叉掉黑色視窗或程式當掉時，它會在幾秒內卸載模型並關閉 Ollama；最後的保險是 30 分鐘閒置自動卸載 |
+| **關閉即釋放顯示卡** | 無 | **有** | 結束 LiveTranslate 時程式會呼叫 Ollama 卸載翻譯模型，接著關閉自己開的 Ollama 服務；Whisper 子程序隨程式結束釋放。另有隱藏的看門狗（`launcher\gpu_watchdog.ps1`，紀錄在 `logs\gpu_watchdog.log`）：程式當掉時，它會在幾秒內卸載模型並關閉 Ollama；最後的保險是 30 分鐘閒置自動卸載 |
 | Ollama `OLLAMA_FLASH_ATTENTION=1` | 關 | **開** | 省顯示記憶體、提示詞處理較快 |
 | Ollama `OLLAMA_NUM_PARALLEL=2`、`OLLAMA_CONTEXT_LENGTH=2048` | 4 個平行槽、4096 context | **2 槽、2048** | KV cache 比預設省；即時預覽與正式翻譯各佔一槽，不會互相排隊（翻譯一次只需幾百個 token） |
 | 啟動順序 | 先載入翻譯模型，再開程式 | **先開程式，同時暖機（載入模型＋真的翻譯一次）** | 2026-10-19 曾發生整場翻譯全部逾時：模型剛載入時第一次回應可能要十幾秒，現在這段時間和 Whisper 載入重疊，程式開好時翻譯已經暖了 |
@@ -223,7 +223,7 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 3. 翻譯模型編輯 → 上下文數 2～3（越少提示詞越短）。
 4. 以上都調了還慢，看系統匣 → Show Log 裡 `ASR (xxx ms)` 與 `Translate (xxx ms)` 的數字：若 ASR 超過 1 秒，通常是顯示記憶體被其他程式吃掉（關 Wallpaper Engine / 遊戲）。
 
-這些 Ollama 環境變數只在「由啟動腳本開的 Ollama」生效，所以啟動腳本會記錄自己開的 Ollama 的 PID（`launcher\ollama.pid`）；若發現 11434 上的是系統匣自動啟動的舊服務（沒有快速設定），會自動把它關掉並重新以快速設定啟動。這不會動到 WSL 裡的 Ollama。
+這些 Ollama 環境變數只在「由 LiveTranslate 開的 Ollama」生效，所以程式會記錄自己開的 Ollama 的 PID（`launcher\ollama.pid`）；若發現 11434 上的是系統匣自動啟動的舊服務（沒有快速設定），會自動把它關掉並重新以快速設定啟動。這不會動到 WSL 裡的 Ollama。
 
 想改回原版行為：`config.yaml` 的 `beam_size` 改 5；Settings → VAD / ASR 把時間參數調回；翻譯模型編輯對話框把上下文數改回 5。
 
@@ -237,7 +237,7 @@ LiveTranslate 內建清單只有 tiny/base/small/medium/large-v3，但支援「�
 | 可加入人名／術語 | `asr.whisper.hotwords` 填 VTuber 名字、遊戲術語（逗號分隔），Whisper 會偏向辨識成這些詞 | `config.yaml` |
 | 可加入風格提示 | `asr.whisper.initial_prompt`，例如「こんにちは。今日は、配信を始めます。」可讓輸出帶標點，斷句更準（用 Anime-Whisper 時請留空） | `config.yaml` |
 | 翻譯提示詞加範例 | 系統提示詞多了三組「日文 → 台灣口語」範例，用語更一致；提示詞會被 Ollama 快取，不增加延遲 | `user_settings.json` → `system_prompt` |
-| Ollama KV cache 8-bit | `OLLAMA_KV_CACHE_TYPE=q8_0`（需搭配 flash attention），顯示記憶體再省一些，品質幾乎無差 | `launcher\start_jp_subtitles.ps1` |
+| Ollama KV cache 8-bit | `OLLAMA_KV_CACHE_TYPE=q8_0`（需搭配 flash attention），顯示記憶體再省一些，品質幾乎無差 | `ollama_server.py`（`fast_env`） |
 
 **翻譯模型比較**（同一台機器、8 句直播口語、暖機後逐句測，/v1 端點）：
 
@@ -288,7 +288,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 | 欄位（實際名稱） | 要選 / 填的值 |
 |---|---|
 | 目前模型 (用於翻譯管線) | **Ollama qwen3.5:9b** |
-| 模型設定 → 編輯該模型 → API 位址: | `http://127.0.0.1:11435/v1`（啟動腳本會視情況自動改成 11434） |
+| 模型設定 → 編輯該模型 → API 位址: | `http://127.0.0.1:11435/v1`（LiveTranslate 會視情況自動改成 11434） |
 | API 金鑰: | `ollama` |
 | 模型: | `qwen3.5:9b` |
 | 代理: | **不使用代理** |
@@ -316,14 +316,14 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 ## 4. 日常使用方式
 
 1. 開啟 Chrome 的 YouTube 直播。
-2. 點兩下 `D:\workspace\language_translate` 裡的 **`LiveTranslate.bat`**，出現選單後直接按 Enter 就啟動（可自行建立桌面捷徑）。黑色視窗會依序顯示 Ollama 檢查、模型檢查，然後出現字幕浮動視窗；語音模型載入約 5–10 秒。
+2. 點兩下 `D:\workspace\language_translate` 裡的 **`LiveTranslate.exe`**（可自行建立桌面捷徑）。不會出現命令列視窗，工作列會多一個 LiveTranslate；程式會自己檢查／啟動 Ollama、確認翻譯模型，語音模型載入約 5–10 秒。想看即時記錄就改用 `LiveTranslate（除錯）.bat`。
 3. 把字幕視窗拖到想要的位置，勾 **Top-most** 與 **Click-through**。
 4. 直播有人講話後約 1–3 秒會出現日文原文與中文翻譯。
-5. **關閉**：字幕視窗右上角 **結束**，或右下角系統匣的 LiveTranslate 圖示 → 結束。關閉黑色視窗也會一起結束。
-   結束時程式會自動卸載翻譯模型並關閉啟動腳本開的 Ollama，顯示記憶體會全部釋放（黑色視窗會顯示「已卸載」「Ollama 服務已關閉」）。直接叉掉黑色視窗也可以：隱藏的看門狗會在幾秒內完成同樣的釋放。
+5. **關閉**：字幕視窗右上角 **結束**，或右下角系統匣的 LiveTranslate 圖示 → 結束。
+   結束時程式會自動卸載翻譯模型並關閉自己開的 Ollama，顯示記憶體會全部釋放；程式當掉時，隱藏的看門狗會在幾秒內完成同樣的釋放。
 6. **切換語音辨識模型**：Settings → VAD / ASR → 引擎 改成 Anime-Whisper（或 Whisper 模型下拉改 large-v3 / medium）。切換會自動重載，不用重啟。
-7. **切換翻譯模型**：啟動視窗的「翻譯模型」選好後直接按「▶ 啟動字幕」，會先換成該模型再啟動（Qwen3.5 9B / 4B、Sakura GalTransl 7B；沒下載的會先確認大小，下載失敗就不啟動）；只想先下載／切換、不啟動可按「切換」；字幕執行中也可以在對話記錄視窗的模型選單直接切換，Ollama 只保留一個模型在顯示卡上（`OLLAMA_MAX_LOADED_MODELS=1`）。選擇存在 `launcher\selected_model.txt`（git 不追蹤，選單會顯示目前模型）；不會改動任何腳本，所以不影響自動更新。檔案內容無效時會提示並改用預設 qwen3.5:9b。
-8. **更新**：每次雙擊 `LiveTranslate.bat` 都會自動檢查 GitHub 上的新版本並更新（`launcher\update.ps1`）；離線、或本機有未提交的修改時會略過，不會擋啟動。套件清單有變才會重裝套件。
+7. **切換翻譯模型**：設定 → 翻譯 → 本機翻譯模型（Qwen3.5 9B / 4B、Sakura GalTransl 7B），按「使用」或「下載並使用」（沒下載的會顯示下載進度；顯示卡可能放不下的會先確認）；字幕執行中也可以在對話記錄視窗的模型選單直接切換，Ollama 只保留一個模型在顯示卡上（`OLLAMA_MAX_LOADED_MODELS=1`），下次啟動沿用目前使用中的模型。
+8. **更新**：程式開啟約 15 秒後會在背景檢查 GitHub 上的新版本；有新版本時系統匣會提醒，到 設定 → 首頁 → 維護 →「更新並重新啟動」。離線、目前的分支只在本機、或本機有未提交的修改時會說明原因並略過。套件清單有變時，程式關閉後由更新視窗重裝套件再重新啟動。
 9. 每次執行會在 `D:\workspace\language_translate\transcripts\` 留下原文 / 翻譯逐字稿（可在 Settings → 逐字稿儲存 關閉）。
 10. **兩種字幕視窗的操作方式**
     - 主浮動視窗（有「LiveTranslate」標題列的那個）：拖標題列移動，右下角有縮放把手；勾「滑鼠穿透」後只有標題列能點。標題列的 **—** 按鈕把它縮到 Windows 工作列，點工作列上的 LiveTranslate 或左鍵點系統匣圖示就叫回來（系統匣圖示再點一下又會縮下去）。
@@ -333,7 +333,7 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 
 ## 5. 驗證方式
 
-最簡單：`LiveTranslate.bat` → 2，應看到：
+最簡單：設定 → 首頁 → 維護 → 檢查環境，應看到：
 
 1. `nvidia-smi` 列出 RTX 5070。
 2. `torch 2.11.0+cu128 | cuda available: True | NVIDIA GeForce RTX 5070`
@@ -351,33 +351,32 @@ HY-MT 若要使用：直接 `ollama pull hf.co/tencent/HY-MT1.5-1.8B-GGUF:Q8_0` 
 
 | 現象 | 原因 | 解法 |
 |---|---|---|
-| Windows 版 Ollama 裝好但 `localhost:11434` 回應的是 0.34.0，`ollama pull` 把模型拉進 WSL | WSL 內的 Ollama 透過 wslrelay 佔住 11434 | 啟動腳本自動改用 11435；手動時設 `$env:OLLAMA_HOST="127.0.0.1:11435"` 再執行 `ollama serve` / `ollama pull` |
+| Windows 版 Ollama 裝好但 `localhost:11434` 回應的是 0.34.0，`ollama pull` 把模型拉進 WSL | WSL 內的 Ollama 透過 wslrelay 佔住 11434 | LiveTranslate 自動改用 11435；手動時設 `$env:OLLAMA_HOST="127.0.0.1:11435"` 再執行 `ollama serve` / `ollama pull` |
 | `RuntimeError: Library cublas64_12.dll is not found` | CTranslate2 wheel 不含 cuBLAS，只有 torch 載入後才找得到 | venv 內的 `livetranslate_cuda_dlls.pth` 會預先載入 torch 附帶的 DLL（已安裝）。模組內容：用 `ctypes.WinDLL` 載入 `torch\lib\cudart64_12.dll`、`cublasLt64_12.dll`、`cublas64_12.dll` |
 | 翻譯一直空白，Log 出現「Empty translation but 256 completion tokens were used」 | Ollama 的 OpenAI 相容端點忽略 `think:false`、`enable_thinking`、`chat_template_kwargs` 等，qwen3.5 把 token 全拿去思考 | 模型設定的「禁用思考」改成 **reasoning_effort=none**（實測唯一有效） |
-| `install.bat` 跑到一半停住等輸入 | 它用 Read-Host 問 CUDA/CPU | 照第 2 節步驟 5 手動安裝 |
-| 黑色視窗中文變亂碼 | 系統地區是日文，主控台預設 cp932 | `.bat` 內已先 `chcp 65001`；PowerShell 腳本存成 UTF-8 with BOM |
+| 除錯入口的命令列中文變亂碼 | 系統地區是日文，主控台預設 cp932 | Python 直接用 Unicode 寫主控台不受影響；PowerShell 腳本存成 UTF-8 with BOM，安裝視窗與更新視窗以 UTF-8 讀取輸出 |
 | Log 出現 `ASR worker RSS grew … over baseline; recycling` 然後重載模型約 4 秒 | 程式的記憶體保護機制，第一次推論後 worker 記憶體增長超過門檻 | 正常現象，重載後繼續運作；若太頻繁可在 VAD / ASR 把模型換成 medium |
 
 ### 常見問題
 
-- **翻譯到一半卡住（有辨識、沒翻譯、也沒錯誤）**：2026-10-19 實際發生過。當時顯示記憶體 11.35 / 12.2 GB（翻譯 5.3 + 語音 1.5 + 桌面程式 4.5 GB），Windows 把顯示卡記憶體換到系統記憶體，模型變成幾秒才吐一個字。現在程式會在超過 `timeout` 秒時切斷並記警告、排隊超過 6 句會跳系統匣提示、啟動前會檢查可用顯示記憶體；根本解法仍是關掉其他吃顯示卡的程式或改用 4b。
+- **翻譯到一半卡住（有辨識、沒翻譯、也沒錯誤）**：2026-10-19 實際發生過。當時顯示記憶體 11.35 / 12.2 GB（翻譯 5.3 + 語音 1.5 + 桌面程式 4.5 GB），Windows 把顯示卡記憶體換到系統記憶體，模型變成幾秒才吐一個字。現在程式會在超過 `timeout` 秒時切斷並記警告、排隊超過 6 句會跳系統匣提示、開啟時會檢查可用顯示記憶體（不夠就跳系統匣提示）；根本解法仍是關掉其他吃顯示卡的程式或改用 4b。
 - **翻譯執行緒卡死（有辨識、沒翻譯、連逾時警告都沒有）**：2026-10-19 20:23 發生，9 條翻譯執行緒同時停住、既不完成也不逾時，按「結束」後程式在等待它們時被 Windows 判定無回應強制關閉。**根因已找到並修正**：即時預覽遇到新文字會丟下舊的翻譯串流，被丟下的串流沒有馬上關閉，要等 Python 垃圾回收時才關；如果回收剛好發生在另一個請求持有 HTTP 連線池鎖的時候，關閉動作會再去拿同一把鎖，那條執行緒就自己卡死，之後所有翻譯都排在這把鎖後面。現在每個串流不論正常結束、被丟下或出錯都會當場關閉（`tests/test_stream_close.py` 可穩定重現修正前的死結）。保險機制仍保留：排隊警告時把執行緒堆疊寫進 log（搜尋 `Thread dump`），關閉時最多等翻譯執行緒 5 秒。
-- **顯示記憶體不足 / 翻譯變很慢**：實測在桌面開了很多程式（Chrome、Discord、Steam、Wallpaper Engine 等已吃 3.7 GB）時，Whisper turbo + qwen3.5:9b 會用到 11.6 / 12.2 GB，非常接近上限。先關掉 Wallpaper Engine、多餘的 Chrome 分頁；仍不夠就在啟動視窗的翻譯模型清單改用標示【推薦】的模型（例如 `qwen3.5:4b`，約 3.7 GB VRAM）。
-- **依顯示卡推薦模型**：啟動視窗會顯示顯示卡大小、目前的辨識模型與推薦的翻譯模型，清單裡放不下的模型標【顯示卡可能不夠】、接近上限的標【接近上限】，選到放不下的會先跳確認。第一次安裝時也會依顯示卡總記憶體選預設組合：12 GB 用 Whisper turbo＋Qwen3.5 9B、10 GB 用 Whisper turbo＋Sakura 7B、8 GB 用 SenseVoice＋Sakura 7B、6 GB 用 SenseVoice＋Qwen3.5 4B。各模型需要的顯示記憶體來自最佳組合評測的實測（`local_models.json` 的 `vram_gb`、`hardware_profile.py`），判斷時另外預留 1.5 GB 給桌面與其他程式。啟動前的可用量檢查也改成依目前的組合計算。
-- **玩遊戲時不能同時使用**：遊戲本身會吃掉大部分 VRAM，Ollama 會被迫改用 CPU/RAM，翻譯延遲變成 10 秒以上甚至失敗。玩遊戲前先結束 LiveTranslate（按「結束」或直接叉掉黑色視窗都會自動釋放顯示記憶體）。
+- **顯示記憶體不足 / 翻譯變很慢**：實測在桌面開了很多程式（Chrome、Discord、Steam、Wallpaper Engine 等已吃 3.7 GB）時，Whisper turbo + qwen3.5:9b 會用到 11.6 / 12.2 GB，非常接近上限。先關掉 Wallpaper Engine、多餘的 Chrome 分頁；仍不夠就在 設定 → 翻譯 → 本機翻譯模型 改用標示【推薦】的模型（例如 `qwen3.5:4b`，約 3.7 GB VRAM）。
+- **依顯示卡推薦模型**：設定 → 翻譯 → 本機翻譯模型 會顯示顯示卡大小、目前的辨識模型與推薦的翻譯模型，清單裡放不下的模型標【顯示卡可能不夠】、接近上限的標【接近上限】，選到放不下的會先跳確認。第一次安裝時也會依顯示卡總記憶體選預設組合：12 GB 用 Whisper turbo＋Qwen3.5 9B、10 GB 用 Whisper turbo＋Sakura 7B、8 GB 用 SenseVoice＋Sakura 7B、6 GB 用 SenseVoice＋Qwen3.5 4B。各模型需要的顯示記憶體來自最佳組合評測的實測（`local_models.json` 的 `vram_gb`、`hardware_profile.py`），判斷時另外預留 1.5 GB 給桌面與其他程式。開啟時的可用量檢查也依目前的組合計算（在語音模型載入前量）。
+- **玩遊戲時不能同時使用**：遊戲本身會吃掉大部分 VRAM，Ollama 會被迫改用 CPU/RAM，翻譯延遲變成 10 秒以上甚至失敗。玩遊戲前先結束 LiveTranslate（按「結束」會自動釋放顯示記憶體）。
 - **背景音樂太大聲、辨識出奇怪的句子**（實測在沒人講話時辨識出「ご視聴ありがとうございました」）：這是 Whisper 對音樂/靜音的幻覺。調高 Settings → VAD / ASR → Silero VAD 閾值 到 0.5–0.6；或把引擎換成 Anime-Whisper（對日文配音較穩）；YouTube 端調低背景音樂無法做到，只能靠 VAD。
 - **字幕出現簡體中文**：系統提示詞已強制台灣繁體；若仍出現，確認 翻譯 分頁的「預設」是 **自訂** 而不是「日常聊天」等預設（那些預設是英文提示詞，只說 Chinese）。也可在提示詞再加一句「輸出前檢查沒有任何簡體字」。
 - **只想擷取 Chrome 的聲音**：LiveTranslate 只能擷取「某個輸出裝置」的全部聲音，沒有按程式擷取。替代做法：Windows 設定 → 系統 → 音效 → 音量混音器 → 把 Chrome 的「輸出裝置」改成另一個裝置（例如螢幕 HDMI 喇叭或虛擬音效裝置），然後在 LiveTranslate 的「音频」選那個裝置；其他程式維持原本輸出就不會被收進去。最簡單的方式則是看直播時把 Spotify / Discord 等靜音。
 - **字幕視窗不見了**：系統匣圖示 → Show，或 Settings 內「重設視窗位置」。
 - **開機後第一次啟動很久**：Ollama 第一次把 6.5 GB 模型載入顯示卡需 30–120 秒，之後就快了。
-- **重開機後 API 埠變了**：正常。Windows 版 Ollama 開機自動啟動，若比 WSL 早搶到 11434，啟動腳本就會把設定改回 11434；兩種情況都會自動處理。
+- **重開機後 API 埠變了**：正常。Windows 版 Ollama 開機自動啟動，若比 WSL 早搶到 11434，LiveTranslate 就會把設定改回 11434；兩種情況都會自動處理。
 - **`ollama` 指令找不到**：安裝程式已加到使用者 PATH，開新的 PowerShell 即可；或用完整路徑 `%LOCALAPPDATA%\Programs\Ollama\ollama.exe`。
 
 ---
 
 ## 7. 解除安裝
 
-1. 用「結束」關閉 LiveTranslate（會自動卸載模型並關閉啟動腳本開的 Ollama）；若還有殘留，工作管理員結束 `ollama.exe`、`ollama app.exe`。
+1. 用「結束」關閉 LiveTranslate（會自動卸載模型並關閉它開的 Ollama）；若還有殘留，工作管理員結束 `ollama.exe`、`ollama app.exe`。
 2. 刪除整個資料夾 `D:\workspace\language_translate`（含 venv、Whisper 模型、逐字稿，約 7 GB）。
 3. （啟動用的 .bat 都在專案資料夾內，會一起刪除）。
 4. 移除 Ollama：

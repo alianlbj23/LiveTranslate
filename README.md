@@ -46,9 +46,9 @@ See [English Changelog](i18n/CHANGELOG_en.md) | [中文更新日志](i18n/CHANGE
 
 ## Quick Start
 
-### Portable build (no Python required, recommended for non-developers)
+### Release package (recommended for non-developers)
 
-Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip, and double-click **`start.bat`**. The first run auto-downloads a portable Python 3.12 and installs GPU-aware dependencies — no Python installation needed.
+Download `LiveTranslate-portable-*.zip` from [Releases](https://github.com/TheDeathDragon/LiveTranslate/releases), unzip it to a path without spaces or non-ASCII characters, and double-click **`LiveTranslate.exe`**. The first run opens an installation window (Python, Git and Ollama through winget when missing, the packages, the speech model, and defaults picked for your graphics card); after that it starts LiveTranslate directly — no console window at all. Windows may show "Windows protected your PC" for this unsigned program: choose "More info" → "Run anyway".
 
 ### From source
 
@@ -57,15 +57,9 @@ git clone https://github.com/TheDeathDragon/LiveTranslate.git
 cd LiveTranslate
 ```
 
-Double-click **`install.bat`** — the installer will:
-1. Detect Python 3.10–3.12 (auto-install via winget if missing)
-2. Create a virtual environment
-3. Auto-detect NVIDIA GPU and let you choose CUDA / CPU PyTorch
-4. Install all dependencies
+Double-click **`LiveTranslate（除錯）.bat`** (debug entry): the first time it runs the same installer (`launcher\setup.ps1`) in a console and builds `LiveTranslate.exe`. Then start with `LiveTranslate.exe` (no console), or keep using the debug entry to see the live log.
 
-Then double-click **`start.bat`** to launch.
-
-To update, double-click **`update.bat`** — it will pull the latest code and update dependencies (auto-installs Git via winget if missing).
+Updates: LiveTranslate checks GitHub in the background after it starts; when there is a new version, use Settings → Home → Maintenance → "Update and restart".
 
 <details>
 <summary>Manual install</summary>

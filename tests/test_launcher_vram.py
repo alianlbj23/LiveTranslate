@@ -1,7 +1,7 @@
-"""Graphics card checks in the launcher scripts (launcher/vram.ps1): the defaults a fresh
-install picks for the card (setup.ps1) and the free-memory check before subtitles start
-(start_jp_subtitles.ps1). The decisions come from hardware_profile.py through
-launcher/hardware_advice.py; these tests run the PowerShell side against it."""
+"""Install-time graphics card choice (launcher/vram.ps1, dot-sourced by setup.ps1): the
+defaults a fresh install picks for the card. The decision comes from hardware_profile.py
+through launcher/hardware_advice.py; these tests run the PowerShell side against it. The
+start-time memory check moved into the app (tests/test_local_model_prep.py)."""
 import json
 import re
 import subprocess
@@ -51,51 +51,19 @@ def test_install_choice_without_a_working_helper_keeps_the_old_defaults(tmp_path
     assert (c["asr_choice"], c["model"], c["level"]) == ("whisper-turbo", "qwen3.5:9b", "unknown")
 
 
-@windows_only
-@needs_venv
-def test_start_check_uses_the_pair_in_use(tmp_path):
-    settings = tmp_path / "user_settings.json"
-    settings.write_text(json.dumps({"asr_engine": "funasr", "funasr_model": "sensevoice-small"}), encoding="utf-8")
-    need = _json(_ps(f"Get-StartupVramNeed -Python '{PYTHON}' -Root '{ROOT}' -Settings '{settings}' "
-                     "-Model 'qwen3.5:4b' | ConvertTo-Json -Compress"))
-    assert need["free_need_mb"] == round((0.7 + 3.7 + 0.5) * 1024)
-    assert need["asr_label"] == "SenseVoice Small" and need["model_label"] == "Qwen3.5 4B" and need["gpu_index"] == 0
-    r = _ps(f"Get-StartupVramNeed -Python '{tmp_path / 'missing.exe'}' -Root '{ROOT}' -Settings '{settings}' -Model 'x'")
-    assert r.returncode == 0 and r.stdout.strip() == ""
-
-
-@windows_only
-def test_low_free_memory_names_the_pair_and_points_to_the_recommendation():
-    r = _ps("Test-LowVram -FreeMB 4096 -ThresholdMB 9000 -Pair 'Whisper large-v3-turbo＋Qwen3.5 9B'")
-    assert r.returncode == 0, r.stderr
-    out = r.stdout
-    assert out.strip().splitlines()[-1] == "True"
-    assert "4.0 GB" in out and "8.8 GB" in out and "Qwen3.5 9B" in out and "【推薦】" in out
-    assert "按 3" not in out  # the old advice pointed at the wrong menu number
-    assert _ps("Test-LowVram -FreeMB 9500 -ThresholdMB 9000").stdout.strip().splitlines()[-1] == "False"
-    assert _ps("Test-LowVram -FreeMB -1").stdout.strip().splitlines()[-1] == "False"  # unknown: no warning
-
-
 def test_installer_picks_the_defaults_for_the_card():
     setup = (ROOT / "launcher" / "setup.ps1").read_text(encoding="utf-8-sig")
     step4 = setup[setup.index("# ---------- 4."):]
     assert "Get-InstallChoice" in step4
+    # the chosen model becomes the active one in user_settings.json; the app downloads it
     assert re.search(r"write_settings\.py[^\n]*\$choice\.model[^\n]*\$choice\.asr_choice", step4)
-    assert "Set-LauncherModel" in step4  # the start script pulls the chosen model, not always 9B
+    assert "selected_model.txt" not in setup and "model.ps1" not in setup
     turbo = step4.index("download_whisper_turbo.py")
     # Whisper turbo is downloaded only when chosen, or when the existing settings already use it
     assert "whisper-turbo" in step4[:turbo] and "whisper:turbo" in step4[:turbo]
-    assert "按 3" not in setup and "3) 切換" not in setup
-
-
-def test_start_script_checks_free_memory_for_the_pair_in_use():
-    start = (ROOT / "launcher" / "start_jp_subtitles.ps1").read_text(encoding="utf-8-sig")
-    assert "Get-StartupVramNeed" in start and "-Pair" in start
-    assert "約 6 GB" not in start  # the download size comes from the catalog
-    # measured once Ollama is ready; models it already holds are swapped out, so they count as free
-    check = start.index("Get-FreeVramMB -Index")
-    assert start.index("# ---- Step 2:") < check < start.index("# ---- Step 4:")
-    assert "Get-OllamaLoadedVramMB" in start[check:start.index("# ---- Step 4:")]
+    assert "LiveTranslate.bat" not in setup  # the entries are LiveTranslate.exe and the debug .bat
+    step5 = setup[setup.index("# ---------- 5."):]
+    assert "build_exe.ps1" in step5  # a git checkout gets LiveTranslate.exe here
 
 
 @windows_only
@@ -108,10 +76,3 @@ def test_advice_helper_that_hangs_is_given_up(tmp_path):
             "@{ none = ($null -eq $a); ms = $t.ElapsedMilliseconds } | ConvertTo-Json -Compress")
     res = _json(r)
     assert res["none"] is True and res["ms"] < 10000
-
-
-@windows_only
-def test_ollama_that_does_not_answer_counts_as_nothing_loaded():
-    r = _ps("Get-OllamaLoadedVramMB -Port 1")
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.strip().splitlines()[-1] == "0"

@@ -748,17 +748,18 @@ def test_apply_from_an_unfinished_run_needs_confirmation(world, monkeypatch, tmp
     assert json.loads(settings_path.read_text(encoding="utf-8"))["asr_engine"] == "whisper"
 
 
-# ---------------------------------------------------------------- apply that would be undone
+# ---------------------------------------------------------------- a cloud model is applied as it is
 
-def test_apply_warns_that_the_launcher_keeps_its_local_model(tmp_path, monkeypatch):
+def test_applied_cloud_model_stays_in_use(tmp_path, monkeypatch):
+    """The old console launcher switched back to its local model at every start, so applying
+    a cloud model came with a warning; LiveTranslate now keeps whatever model is active."""
     settings = {"models": [{"name": "Cloud", "model": "gpt-x", "api_base": "https://api.example.com/v1", "api_key": "k"},
                            MODELS[0]], "asr_engine": "whisper", "vad_threshold": 0.5, "active_model": 1}
     path = tmp_path / "user_settings.json"
     path.write_text(json.dumps(settings), encoding="utf-8")
     monkeypatch.setattr(settings_io, "find_running_app", lambda: [])
     changes = settings_io.planned_changes(settings, "sensevoice", 0.5, settings["models"][0])
-    notes = settings_io.apply_notes(settings["models"][0])
-    assert notes and "啟動器" in notes[0]
+    assert not hasattr(settings_io, "apply_notes")
     settings_io.apply_changes(changes, settings["models"][0], settings_path=path,
                               selected_file=tmp_path / "selected_model.txt")
     after = json.loads(path.read_text(encoding="utf-8"))

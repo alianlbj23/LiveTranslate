@@ -1,5 +1,5 @@
-"""Entry point of the best-combination benchmark (called by launcher/bench.ps1; the user
-picks menu items, never types these arguments).
+"""Entry point of the best-combination benchmark (run by the benchmark window,
+bench/window.py, with --json; the user presses buttons, never types these arguments).
 
 Usage: python -I bench_run.py status | download | start [--quick] | resume | report | apply"""
 import os
