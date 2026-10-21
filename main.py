@@ -2373,6 +2373,14 @@ def main():
         log_dir=Path(__file__).parent / "logs", free_gb_at_start=free_gb_at_start, parent=app,
     )
 
+    def _use_local_model(model: str):
+        # Settings → Translation → local models: download when needed, then switch to it
+        if not local_starter.start(panel.get_settings(), {"model": model}, confirmed=True):
+            panel.notify_local_model_busy()
+
+    panel.local_model_requested.connect(_use_local_model)
+    local_starter.finished.connect(lambda _result: panel.refresh_local_models())
+
     live_trans = LiveTranslateApp(config)
     live_trans.set_overlay(overlay)
     live_trans.set_subtitle_window(subwin)

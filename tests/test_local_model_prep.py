@@ -22,6 +22,17 @@ import ollama_server  # noqa: E402
 BASE = "http://127.0.0.1:11434/v1"
 
 
+@pytest.fixture(autouse=True)
+def _zh_tw():
+    """The messages are checked in Traditional Chinese whatever the machine's language."""
+    import i18n
+
+    before = i18n.get_lang()
+    i18n.set_lang("zh_TW")
+    yield
+    i18n.set_lang(before)
+
+
 def _settings(model="qwen3.5:9b", base=BASE):
     return {"asr_engine": "whisper", "whisper_model_size": "large-v3-turbo",
             "models": [local_models.catalog_entry(model, base)], "active_model": 0}

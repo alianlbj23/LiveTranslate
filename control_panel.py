@@ -66,6 +66,7 @@ from model_manager import (
     resolve_custom_whisper_model,
 )
 from i18n import t, LANGUAGES
+from local_model_panel import LocalModelsGroup
 from subtitle_settings import SubtitleSettingsWidget
 
 log = logging.getLogger("LiveTranslate.Panel")
@@ -189,6 +190,7 @@ class ControlPanel(FluentWindow):
 
     settings_changed = pyqtSignal(dict)
     model_changed = pyqtSignal(dict)
+    local_model_requested = pyqtSignal(str)  # catalog model to use (downloaded first when needed)
     models_list_changed = pyqtSignal(list, int)
     subtitle_settings_changed = pyqtSignal(dict)
     _bench_result = pyqtSignal(str)
@@ -798,6 +800,11 @@ class ControlPanel(FluentWindow):
     def _create_translation_tab(self):
         page = _Page("translation_interface")
         s = self._current_settings
+
+        # Local Ollama models with graphics card advice (was the launcher's model list)
+        self._local_models_group = LocalModelsGroup(self.get_settings, page.view)
+        self._local_models_group.use_requested.connect(self.local_model_requested.emit)
+        page.add_group(self._local_models_group)
 
         models_card = _BlockCard(t("group_model_configs"), page.view)
         self._model_list = ListWidget()
@@ -1448,6 +1455,15 @@ class ControlPanel(FluentWindow):
             self._model_list.addItem(item)
         if hasattr(self, "_home_model_card"):
             self._refresh_home_from_settings()
+        if hasattr(self, "_local_models_group"):
+            self._local_models_group._render()  # the model in use changed
+
+    def refresh_local_models(self):
+        """Ask Ollama again (after a download or a switch)."""
+        self._local_models_group.refresh()
+
+    def notify_local_model_busy(self):
+        InfoBar.warning(t("lm_title_model"), t("lm_busy"), parent=self, duration=4000)
 
     def replace_local_models(self, settings: dict):
         """Take the model list and active model from `settings` (the local Ollama entries

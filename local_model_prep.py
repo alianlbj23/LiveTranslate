@@ -13,6 +13,7 @@ import httpx
 import hardware_profile
 import local_models
 import ollama_server
+from i18n import t
 
 log = logging.getLogger("LiveTranslate.LocalModel")
 
@@ -46,9 +47,8 @@ def measure_free_gb(settings: dict) -> float | None:
 def low_vram_message(free_gb, need: dict) -> str | None:
     if free_gb is None or free_gb >= need["free_need_gb"]:
         return None
-    return (f"可用顯示記憶體只有 {free_gb:.1f} GB，目前的組合（{need['asr_label']}＋{need['model_label']}）"
-            f"大約需要 {need['free_need_gb']:.1f} GB；不夠時翻譯會變得極慢甚至像卡住。"
-            "建議關閉遊戲、Wallpaper Engine 或多餘的瀏覽器分頁，或在設定的「本機翻譯模型」改用標示【推薦】的模型。")
+    return t("lm_low_vram").format(free=free_gb, pair=f"{need['asr_label']}＋{need['model_label']}",
+                                   need=need["free_need_gb"])
 
 
 def prepare(settings: dict, model_entry: dict, log_dir, *, ask_download, on_progress=None,
@@ -61,7 +61,7 @@ def prepare(settings: dict, model_entry: dict, log_dir, *, ask_download, on_prog
         port = ollama_server.ensure_server(model, log_dir, say=say)
     except RuntimeError as e:
         log.error(f"Ollama could not be started: {e}")
-        return PrepResult(error=f"無法啟動 Ollama：{e}")
+        return PrepResult(error=t("lm_err_ollama_start").format(e=e))
     server = ollama_server.Ollama(ollama_server.root_url(port))
     try:
         installed = server.installed()
@@ -74,24 +74,23 @@ def prepare(settings: dict, model_entry: dict, log_dir, *, ask_download, on_prog
     label = entry["label"] if entry else model
     if installed is not None and model not in installed:
         if not ask_download(model, label, entry["size_gb"] if entry else None):
-            return PrepResult(port=port, error=f"翻譯模型 {label} 還沒下載，翻譯暫時無法使用；"
-                                                "可以在設定的「本機翻譯模型」下載。")
-        say(f"下載 {label}")
+            return PrepResult(port=port, error=t("lm_err_not_downloaded").format(label=label))
+        say(f"Downloading {model}")
         try:
             server.pull(model, on_progress=on_progress, cancelled=cancelled)
         except ollama_server.PullCancelled:
             log.info(f"Download of {model} cancelled")
-            return PrepResult(port=port, error=f"已取消下載 {label}，翻譯暫時無法使用。")
+            return PrepResult(port=port, error=t("lm_err_cancelled").format(label=label))
         except ollama_server.PullError as e:
             log.error(f"Download of {model} failed: {e}")
-            return PrepResult(port=port, error=f"{label} 下載失敗：{e}")
+            return PrepResult(port=port, error=t("lm_err_download_failed").format(label=label, e=e))
         installed = set(installed) | {model}
 
     try:
         new = local_models.sync_local_models(settings, f"{ollama_server.root_url(port)}/v1", model, installed)
     except ValueError as e:  # a model name Ollama cannot have
         log.error(f"Cannot point the local model entries at port {port}: {e}")
-        return PrepResult(port=port, error=f"翻譯模型名稱無法使用：{model}")
+        return PrepResult(port=port, error=t("lm_err_bad_name").format(model=model))
     result = PrepResult(port=port, settings=new if new != settings else None)
     if free_gb_at_start is not None and catalog:
         need = hardware_profile.startup_check(new, model, catalog)
