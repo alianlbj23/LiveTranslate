@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-22
+- The entry point is now LiveTranslate.exe and normal use shows no console: the first launch opens an installation window (Python, Git, Ollama, packages and the speech model are installed automatically), later launches start the app directly; the console launcher and its menu are removed, and "LiveTranslate（除錯）.bat" is kept for troubleshooting (not in the release zip)
+- The app manages local translation models itself: at start it runs Ollama, asks before downloading a missing model and shows the progress, and checks GPU memory; on exit it unloads the models and stops Ollama; a remote / LAN Ollama is no longer treated as local
+- Model advice by graphics card: Settings → Translation → "Local translation models" tags models [Recommended] / [Near the limit] / [May not fit] with one-click download and use; a fresh install picks the speech and translation models for the card
+- New "Maintenance" section on the settings home page: environment check (GPU driver, PyTorch / CTranslate2 CUDA, Ollama, a test translation, results can be copied), update check, and the best combination benchmark
+- In-app updates: checked in the background after start, you are only notified and nothing is installed until you click "Update and restart"; release packages update too (downloaded from GitHub Releases and verified), models, settings and logs are kept
+- The best combination benchmark is now a window: questions are dialogs, progress is shown in the window, and it can be stopped and LiveTranslate reopened
+- The overlay always has a taskbar button and a new minimize button, with the system animation when minimizing / restoring; a left click on the tray icon minimizes / restores it
+- Packaging fix: "快速開始.md" (quick start), missing from earlier zips, is included again
+
 ## 2026-10-21
 - New graphical launcher (LiveTranslate.bat): the first double-click installs everything, every start checks for updates, and the translation model is picked from a list that shows whether each model is downloaded and how big it is; the three .bat files are merged into one entry point, with the text menu kept as a fallback
 - Windows 11 Fluent look: the control panel and the transcript window use card styling, and the transcript window can be stretched vertically; new "minimum speech ratio" setting and "restore factory settings"
