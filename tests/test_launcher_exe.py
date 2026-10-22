@@ -43,6 +43,16 @@ def exe(tmp_path_factory) -> Path:
     return out
 
 
+def test_build_reports_the_output_path(tmp_path):
+    # PowerShell names are case-insensitive: the compiler output must not overwrite -Out
+    out = tmp_path / "LiveTranslate.exe"
+    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        str(ROOT / "launcher" / "build_exe.ps1"), "-Out", str(out)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    assert r.returncode == 0 and out.exists(), r.stdout + r.stderr
+    assert str(out) in r.stdout
+
+
 def _root(tmp_path, exe, installed=False, standin=None) -> Path:
     shutil.copy(exe, tmp_path / "LiveTranslate.exe")
     if installed:

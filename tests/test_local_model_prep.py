@@ -228,7 +228,7 @@ def _starter(qapp, prepare_fn, answer=True, settings=None):
         apply_settings=calls["apply"].append, warm=calls["warm"].append,
         notify=lambda title, text, error: calls["notify"].append((title, text, error)),
         log_dir=Path("logs"), get_settings=lambda: settings or _settings(), free_gb_at_start=3.0,
-        prepare=prepare_fn, ask=ask,
+        prepare=prepare_fn, ask=ask, measure=lambda settings: 3.0,  # later runs: never the real card / Ollama
     )
     return s, calls
 
@@ -459,7 +459,8 @@ def test_question_that_crashes_counts_as_no(qapp, caplog):
     notes = []
     s = local_model_ui.LocalModelStarter(apply_settings=lambda x: None, warm=lambda e: None,
                                          notify=lambda *a: notes.append(a), log_dir=Path("logs"),
-                                         get_settings=dict, prepare=prepare_fn, ask=broken_ask)
+                                         get_settings=dict, prepare=prepare_fn, ask=broken_ask,
+                                         measure=lambda settings: 3.0)
     s.start({}, {"model": "m"})
     _wait(qapp, lambda: notes)
     assert seen == {"answer": False} and "dialog failed" in caplog.text

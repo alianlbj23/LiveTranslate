@@ -13,10 +13,11 @@ if (-not (Test-Path -LiteralPath $csc)) {
 }
 $src  = Join-Path $PSScriptRoot "LiveTranslate.cs"
 $icon = Join-Path $Root "assets\LiveTranslate.ico"
-$out = & $csc /nologo /target:winexe /optimize+ /codepage:65001 "/out:$Out" "/win32icon:$icon" `
+# not $out: PowerShell names are case-insensitive, it would overwrite -Out
+$cscOutput = & $csc /nologo /target:winexe /optimize+ /codepage:65001 "/out:$Out" "/win32icon:$icon" `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $src
 $code = $LASTEXITCODE
-if ($out) { $out | ForEach-Object { Write-Host $_ } }
+if ($cscOutput) { $cscOutput | ForEach-Object { Write-Host $_ } }
 if ($code -ne 0) {
     Write-Host "編譯 LiveTranslate.exe 失敗（結束代碼 $code）"
     exit $code
